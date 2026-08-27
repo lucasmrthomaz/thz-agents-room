@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -37,6 +38,44 @@ DB_PATH = DATA_DIR / "thz-room-cortex.db"
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
 DEFAULT_MODEL = "qwen2.5:7b"
+
+# =====================================================================
+# SHUTDOWN GRACEFUL
+# =====================================================================
+
+class GracefulShutdown:
+    """Gerencia shutdown gracioso com salvamento de dados."""
+    def __init__(self):
+        self.should_exit = False
+        self.current_session = None
+        self.current_debate = None
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        logger.info("[SHUTDOWN] Sinal recebido. Salvando dados...")
+        self.should_exit = True
+
+    async def save_current_state(self):
+        """Salva o estado atual da sessao em caso de interrupcao."""
+        if self.current_session:
+            try:
+                session_dir = SessionFiles.get_session_dir(self.current_session["id"])
+                summary_data = {
+                    "session_id": self.current_session["id"],
+                    "total_debates": self.current_session.get("debate_count", 0),
+                    "duration_hours": self.current_session.get("duration", 0),
+                    "topics": self.current_session.get("topics", []),
+                    "interrupted": True,
+                    "interrupted_at": datetime.now().isoformat(),
+                    "created_at": self.current_session.get("start_time", datetime.now().isoformat())
+                }
+                await SessionFiles.save_session_summary(session_dir, summary_data)
+                logger.info(f"[SHUTDOWN] Sessao salva em {session_dir}")
+            except Exception as e:
+                logger.error(f"[SHUTDOWN] Erro ao salvar sessao: {e}")
+
+shutdown_manager = GracefulShutdown()
 
 # =====================================================================
 # 1. ESQUEMAS DE DADOS
@@ -339,39 +378,96 @@ RESPECT_RULES = (
 )
 
 FALLBACK_TOPICS = [
+    # Arquitetura
     "Microservicos vs Monolito: quando a complexidade nao compensa",
-    "Kafka vs RabbitMQ: qual fila de mensagens escolher?",
+    "Event sourcing: quando vale a pena implementar?",
+    "Domain-Driven Design: vale a pena em projetos pequenos?",
+    "Arquitetura hexagonal: pratica ou teoria?",
+    "Monolito modular: a melhor de ambos os mundos?",
+    # DevOps
     "CI/CD com GitHub Actions vs GitLab CI: prós e contras",
     "Docker vs Podman: vale a pena trocar?",
+    "Kubernetes: vale a pena para equipes pequenas?",
+    "Infrastructure as Code: Terraform vs Pulumi",
+    "GitOps: conceito vs realidade em empresas brasileiras",
+    # Dados
+    "Kafka vs RabbitMQ: qual fila de mensagens escolher?",
     "PostgreSQL vs MongoDB: quando o NoSQL nao e a resposta",
+    "Cache invalidation: padroes eficazes em producao",
+    "Banco de dados: conexoes, pooling e concorrencia",
+    "Data lake vs data warehouse: qual arquitetura escolher?",
+    # Seguranca
+    "Seguranca em APIs: OAuth2, JWT e boas praticas",
+    "Zero trust: conceito aplicado a empresas medias",
+    "DevSecOps: como integrar seguranca no pipeline?",
+    "Secret management: Vault, SSM ou solucoes caseiras?",
+    "Container security: boas praticas para producao",
+    # Git
+    "Git flow vs trunk-based development: qual adotar?",
+    "Code review eficaz: padroes e anti-patterns",
+    "Conventional commits: vale a padronizacao?",
+    "Monorepo vs polyrepo: fatores de decisao",
+    "Git hooks: automatizar quality checks no commit",
+    # Testes
     "Testes unitarios vs integracao: onde parar?",
-    "API REST vs gRPC: performance e manutenibilidade",
+    "TDD em 2026: ainda relevante ou obsoleto?",
+    "Testes de contrato: Pact vs REST Assured",
+    "E2E tests: Playwright vs Cypress vs Selenium",
+    "Mutation testing: vale a pena no Brasil?",
+    # Gestao e Processos
+    "Squad autonomo: como evitar silos de conhecimento",
+    "Migracao de legado: estrategias para sistemas criticos",
+    "Tech debt: como medir e priorizar?",
+    "1:1 eficaz: padroes para lideres tecnicos",
+    "RFC tecnico: como escrever propostas de arquitetura?",
+    # Observabilidade
     "Observabilidade: Grafana + Prometheus ou solucoes gerenciadas?",
     "Feature flags: como gerenciar releases sem dor de cabeca",
-    "Git flow vs trunk-based development: qual adotar?",
-    "Cache invalidation: padroes eficazes em producao",
-    "Event sourcing: quando vale a pena implementar?",
+    "SLOs e SLIs: como definir metas de confiabilidade?",
+    "OpenTelemetry: padrao ou mais uma ferramenta?",
+    "Alert fatigue: como reduzir o ruido nos alertas?",
+    # Cloud e Infra
     "Cloud AWS vs Azure vs GCP: fatores de decisao",
-    "Squad autonomo: como evitar silos de conhecimento",
-    "Code review eficaz: padroes e anti-patterns",
-    "Migracao de legado: estrategias para sistemas criticos",
-    "Kubernetes: vale a pena para equipes pequenas?",
-    "Seguranca em APIs: OAuth2, JWT e boas praticas",
-    "Banco de dados: conexoes, pooling e concorrencia",
-    "Monitoramento: como definir SLAs e SLOs eficazes",
+    "Multi-cloud: estrategia ou muleta?",
+    "Serverless: quando realmente economiza?",
+    "FinOps: como governar custos de cloud?",
+    "Edge computing: casos de uso reais no Brasil",
+    # Lideranca
+    "Lideranca tecnica: ser promovido e continuar codando?",
+    "Mentoria tecnica: como estruturar um programa?",
+    "Burnout em tech: sinais e estrategias de prevencao",
+    "Hiring tecnico: como avaliar soft skills?",
+    "Onboarding de devs: boas praticas para squads",
+    # Humano-Computador
+    "UX em APIs: por que developer experience importa?",
+    "Acessibilidade em software interno: por que ignorar?",
+    "Produtividade remota: mitos e realidades em 2026",
+    "Documentacao viva: como manter sem dor de cabeca?",
+    "Fluxo de trabalho: quando o processo atrapalha?",
 ]
 
-async def generate_topic(model: str, history_topics: List[str]) -> str:
-    """Pede ao Ollama para sugerir um topico de debate."""
+# Limite maximo de topicos antes de considerar esgotados
+MAX_TOPICS_WITHOUT_REPEAT = 50
+
+async def generate_topic(model: str, history_topics: List[str]) -> Optional[str]:
+    """Pede ao Ollama para sugerir um topico de debate. Retorna None se topicos esgotados."""
     import random
 
-    # Se ja tem muitos topicos, usa fallback
-    if len(history_topics) >= 15:
-        used = set(history_topics[-20:])
+    # Verifica se topicos estao esgotados
+    if len(history_topics) >= MAX_TOPICS_WITHOUT_REPEAT:
+        logger.warning(f"[TOPICOS] Esgotados! {len(history_topics)} topicos ja discutidos.")
+        return None
+
+    # Se ja tem muitos topicos, mistura fallback com geracao
+    if len(history_topics) >= 20:
+        used = set(history_topics[-30:])
         available = [t for t in FALLBACK_TOPICS if t not in used]
         if available:
-            return random.choice(available)
-        return random.choice(FALLBACK_TOPICS)
+            topic = random.choice(available)
+            logger.info(f"[TOPICOS] Fallback: {topic}")
+            return topic
+        # Todos os fallbacks usados, tenta gerar novos
+        pass
 
     already = "\n".join(f"- {t}" for t in history_topics[-20:]) if history_topics else "Nenhum"
 
@@ -400,23 +496,25 @@ async def generate_topic(model: str, history_topics: List[str]) -> str:
             resp.raise_for_status()
             raw = resp.json()["message"]["content"]
 
-            # Tenta parsear como JSON estruturado
             try:
                 data = json.loads(raw)
                 topic = data.get("topic", "").strip()
             except json.JSONDecodeError:
                 topic = raw.strip().strip('"').strip("'").strip()
 
-            # Validacao: topico deve ter entre 10 e 150 caracteres
             if 10 <= len(topic) <= 150 and not topic.startswith("{"):
-                logger.info(f"Topico gerado: {topic}")
+                logger.info(f"[TOPICOS] Ollama: {topic}")
                 return topic
             else:
-                logger.warning(f"Topico invalido gerado: {topic[:80]}...")
+                logger.warning(f"[TOPICOS] Invalido: {topic[:80]}...")
+                if available := [t for t in FALLBACK_TOPICS if t not in set(history_topics[-30:])]:
+                    return random.choice(available)
                 return random.choice(FALLBACK_TOPICS)
 
     except Exception as e:
-        logger.error(f"Erro ao gerar topico: {e}")
+        logger.error(f"[TOPICOS] Erro ao gerar: {e}")
+        if available := [t for t in FALLBACK_TOPICS if t not in set(history_topics[-30:])]:
+            return random.choice(available)
         return random.choice(FALLBACK_TOPICS)
 
 async def generate_summary(model: str, topics: List[Dict]) -> str:
@@ -633,8 +731,14 @@ class MultiAgentEngine:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     SESSIONS_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(exist_ok=True)
     await CortexDB.init()
+    logger.info("[STARTUP] THz Room iniciado com sucesso")
     yield
+    # Shutdown gracioso
+    logger.info("[SHUTDOWN] Encerrando THz Room...")
+    await shutdown_manager.save_current_state()
+    logger.info("[SHUTDOWN] Dados salvos. Ate logo!")
 
 app = FastAPI(title="THz Room - Multi-Agent Autonomous Engine", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -679,10 +783,23 @@ async def debate_websocket(websocket: WebSocket):
             debate_count = 0
             topics_used = []
 
-            while datetime.now() < end_time:
+            # Registra sessao atual para shutdown gracioso
+            shutdown_manager.current_session = {
+                "id": session_id,
+                "start_time": start_time.isoformat(),
+                "duration": req.duration_hours,
+                "debate_count": 0,
+                "topics": []
+            }
+
+            while datetime.now() < end_time and not shutdown_manager.should_exit:
                 history_topics = await CortexDB.get_discussed_topics()
                 topic = await generate_topic(model, history_topics + topics_used)
                 debate_count += 1
+
+                # Atualiza estado para shutdown
+                shutdown_manager.current_session["debate_count"] = debate_count
+                shutdown_manager.current_session["topics"] = topics_used
 
                 await websocket.send_json({
                     "event": "debate_start",
@@ -697,16 +814,16 @@ async def debate_websocket(websocket: WebSocket):
                 topics_used.append({"topic": topic, "consensus": consensus})
                 await CortexDB.update_topic_memory(topic, consensus)
 
-                await SessionFiles.save_debate(
-                    session_dir, debate_count, topic,
-                    [{"author": a.get("author", ""), "content": a.get("content", ""), "turn": a.get("turn", 0)}
-                     for a in []],
-                    summary=None
-                )
+                # Salva transcript do debate
+                transcript = await self._get_transcript(conv_id)
+                await SessionFiles.save_debate(session_dir, debate_count, topic, transcript, summary=None)
 
-                if datetime.now() + timedelta(minutes=10) < end_time:
+                if datetime.now() + timedelta(minutes=10) < end_time and not shutdown_manager.should_exit:
                     logger.info(f"[PAUSA] 10 minutos antes do proximo debate...")
                     await asyncio.sleep(600)
+
+            # Limpa shutdown manager
+            shutdown_manager.current_session = None
 
             summary_text = await generate_summary(model, topics_used)
             summary_data = {
