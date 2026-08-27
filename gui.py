@@ -187,7 +187,8 @@ class THZMainsApp:
             font=("Consolas", 10), bg=BG_MID, fg=FG_PRIMARY, relief=tk.FLAT,
             highlightthickness=1, highlightbackground=FG_DIM
         )
-        self.hours_entry.pack(side=tk.LEFT, state=tk.DISABLED)
+        self.hours_entry.pack(side=tk.LEFT, padx=(0, 15))
+        self.hours_entry.config(state=tk.DISABLED)
 
         # Separator
         ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X, padx=15, pady=5)
