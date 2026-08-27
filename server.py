@@ -24,6 +24,12 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+# Modulos de estabilidade e RAG
+from stability.context_manager import ContextManager
+from stability.loop_detector import LoopDetector
+from stability.quality_monitor import QualityMonitor
+from rag.semantic_search import SemanticSearch
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -814,6 +820,11 @@ class MultiAgentEngine:
         self.num_ctx = num_ctx
         self.max_turns = max_turns
         self.min_turns = min_turns
+        # Modulos de estabilidade e RAG
+        self.context_manager = ContextManager(num_ctx)
+        self.loop_detector = LoopDetector()
+        self.quality_monitor = QualityMonitor()
+        self.semantic_search = SemanticSearch()
 
     async def execute_debate(self, conversation_id: str, topic: str, websocket: WebSocket,
                              session_id: str = None):
@@ -840,7 +851,7 @@ class MultiAgentEngine:
             })
             return
 
-        # Construir contexto de conhecimento previo
+        # Construir contexto de conhecimento previo (RAG)
         knowledge_context = ""
         if prior_knowledge:
             knowledge_context = "\n\n## Conhecimento de Debates Anteriores:\n"
@@ -854,6 +865,13 @@ class MultiAgentEngine:
             knowledge_context += f"- Ultimo resultado: {'Consenso' if topic_history['last_consensus'] else 'Sem consenso'}\n"
             knowledge_context += f"- Ultima discussao: {topic_history['last_discussed_at']}\n"
 
+        # Auto-expand num_ctx se necessario
+        estimated_tokens = self.context_manager.estimate_tokens(topic) + 500  # overhead
+        self.num_ctx = self.context_manager.auto_expand(estimated_tokens)
+
+        # Health monitoring
+        health = {"diversity_score": 1.0, "trend": "diverging", "repetition_count": 0, "plagiarism_count": 0}
+
         async with httpx.AsyncClient() as http_client:
             while current_turn < self.max_turns:
                 for agent in self.agents:
@@ -864,7 +882,9 @@ class MultiAgentEngine:
                         "data": {"turn": current_turn, "agent": agent.name, "role": agent.role_title}
                     })
 
-                    transcript = [f"[{h['author']} - Turno {h['turn']}]: {h['content']}" for h in history]
+                    # Trunc inteligente do transcript
+                    truncated_history = self.context_manager.truncate_intelligently(history, self.num_ctx - 1000)
+                    transcript = [f"[{h['author']} - Turno {h['turn']}]: {h['content']}" for h in truncated_history]
 
                     if current_turn == 1:
                         instruction = (
@@ -878,6 +898,18 @@ class MultiAgentEngine:
                             "apontando pros/contras e trazendo dados concretos. "
                             "IMPORTANTE: NAO copie trechos de outros agentes. Use suas proprias palavras."
                         )
+
+                    # Knowledge context via RAG (substitui busca por substring)
+                    rag_context = await self.semantic_search.construir_knowledge_context(
+                        topic, agent.name, history
+                    )
+                    if rag_context:
+                        knowledge_context += rag_context
+
+                    # Quality feedback
+                    instruction = self.quality_monitor.inject_quality_feedback(
+                        health, agent.role_title, instruction
+                    )
 
                     user_prompt = (
                         f"Topico da Discusao: {topic}\n\n"
@@ -929,6 +961,19 @@ class MultiAgentEngine:
                     if len(history) >= 1 and _is_plagiarized(decision.argument, history):
                         effective_status = "CONSENSUS"
                         logger.info(f"[PLAGIARISM] Turno {current_turn}: trechos copiados detectados")
+
+                    # Health monitoring (loop detector)
+                    health = self.loop_detector.analyze_debate_health(history)
+                    if self.loop_detector.should_end_debate(health, current_turn, self.min_turns):
+                        effective_status = "CONSENSUS"
+                        logger.info(f"[HEALTH] Turno {current_turn}: {health['recommendation']} (diversity={health['diversity_score']:.2f})")
+
+                    # Quality monitoring
+                    quality = self.quality_monitor.monitor_argument_quality(
+                        decision.argument, history, agent.role_title
+                    )
+                    if quality.get("is_too_short"):
+                        logger.info(f"[QUALITY] Turno {current_turn}: argumento muito curto ({quality['word_count']} palavras)")
 
                     await CortexDB.save_message(
                         conversation_id, agent.name, decision.argument, effective_status, current_turn

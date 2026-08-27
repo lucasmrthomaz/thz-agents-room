@@ -1,0 +1,37 @@
+# THZ Minds — Configuracao de Treinamento QLoRA
+# Ajuste conforme sua GPU e necessidades
+
+# Modelo base
+base_model: "unsloth/qwen2.5-7b-instruct-bnb-4bit"
+
+# Configuracao LoRA
+lora_rank: 8           # Reduzido para 8GB VRAM
+lora_alpha: 16         # 2x rank
+target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+
+# Sequencia
+max_seq_length: 1024   # Limitado para 8GB VRAM
+
+# Configuracao de treinamento
+training_args:
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8    # Effective batch = 8
+  num_train_epochs: 3
+  learning_rate: 2.0e-4
+  fp16: true
+  bf16: false                       # fp16 melhor para RTX 4060
+  optim: "adamw_8bit"
+  save_strategy: "epoch"
+  output_dir: "training/outputs"
+  logging_steps: 10
+  warmup_steps: 5
+  max_grad_norm: 0.3
+  weight_decay: 0.01
+
+# Filtro de dados
+max_examples: 1000     # Max exemplos por agente
+min_words: 50          # Min palavras por argumento
