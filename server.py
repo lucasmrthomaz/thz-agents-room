@@ -230,6 +230,34 @@ class CortexDB:
                     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
                 );
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS argument_embeddings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL UNIQUE,
+                    agent_name TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS debate_health (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    turn INTEGER NOT NULL,
+                    diversity_score REAL,
+                    trend TEXT,
+                    repetition_count INTEGER DEFAULT 0,
+                    plagiarism_count INTEGER DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                );
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_emb_agent ON argument_embeddings(agent_name);")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_emb_topic ON argument_embeddings(topic);")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_emb_message ON argument_embeddings(message_id);")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_health_conv ON debate_health(conversation_id);")
             await db.commit()
             logger.info(f"Cortex DB inicializado: {DB_PATH}")
 
