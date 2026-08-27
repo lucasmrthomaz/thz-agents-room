@@ -1,0 +1,695 @@
+"""
+Multi-Agent Conversation Engine - Autonomous Mode
+Arquitetura: FastAPI + WebSockets + SQLite (thz-room-cortex.db) + Ollama
+
+8 Agentes: 5 Tecnicos + 3 de Negocio
+Modos: Single (sob demanda) + Autonomous (sessao noturna)
+"""
+
+import asyncio
+import json
+import logging
+import os
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Literal, Optional
+
+import aiosqlite
+import httpx
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("ThzRoom")
+
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
+SESSIONS_DIR = BASE_DIR / "sessions"
+DB_PATH = DATA_DIR / "thz-room-cortex.db"
+
+OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
+DEFAULT_MODEL = "qwen2.5:7b"
+
+# =====================================================================
+# 1. ESQUEMAS DE DADOS
+# =====================================================================
+
+class AgentDecision(BaseModel):
+    argument: str = Field(
+        description="Argumento tecnico detalhado em Portugues do Brasil (pt-BR)."
+    )
+    status: Literal["CONTINUE", "CONSENSUS"] = Field(
+        description="CONTINUE para manter a discusao; CONSENSUS apenas em caso de acordo total."
+    )
+
+class SingleDebateRequest(BaseModel):
+    mode: Literal["single"] = "single"
+    topic: str
+    max_turns: int = Field(default=18, ge=6, le=50)
+    num_ctx: int = Field(default=8192, ge=4096, le=32768)
+    model: Optional[str] = None
+
+class AutonomousSessionRequest(BaseModel):
+    mode: Literal["autonomous"] = "autonomous"
+    duration_hours: float = Field(default=8.0, ge=0.5, le=24.0)
+    num_ctx: int = Field(default=8192, ge=4096, le=32768)
+    model: Optional[str] = None
+
+# =====================================================================
+# 2. SELECAO DINAMICA DE MODELO
+# =====================================================================
+
+async def discover_best_model() -> str:
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            resp.raise_for_status()
+            models = resp.json().get("models", [])
+            if not models:
+                return DEFAULT_MODEL
+            best = max(models, key=lambda m: m.get("size", 0))["name"]
+            logger.info(f"Modelo auto-descoberto: {best}")
+            return best
+    except Exception as e:
+        logger.warning(f"Falha ao descobrir modelos: {e}. Usando default: {DEFAULT_MODEL}")
+        return DEFAULT_MODEL
+
+async def resolve_model(requested: Optional[str]) -> str:
+    if requested:
+        logger.info(f"Modelo definido pelo usuario: {requested}")
+        return requested
+    env_model = os.environ.get("OLLAMA_MODEL")
+    if env_model:
+        logger.info(f"Modelo via variavel de ambiente: {env_model}")
+        return env_model
+    return await discover_best_model()
+
+# =====================================================================
+# 3. PERSISTENCIA - thz-room-cortex.db
+# =====================================================================
+
+class CortexDB:
+    """Gerencia o banco de dados 'inteligencia interna' do sistema."""
+
+    @staticmethod
+    async def init():
+        DATA_DIR.mkdir(exist_ok=True)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA journal_mode = WAL;")
+            await db.execute("PRAGMA synchronous = NORMAL;")
+            await db.execute("PRAGMA foreign_keys = ON;")
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    topic TEXT NOT NULL,
+                    session_id TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    turn INTEGER NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS topic_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic TEXT NOT NULL UNIQUE,
+                    category TEXT,
+                    times_discussed INTEGER DEFAULT 1,
+                    last_consensus BOOLEAN,
+                    last_discussed_at DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_skills (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_name TEXT NOT NULL,
+                    skill_domain TEXT NOT NULL,
+                    expertise_level REAL DEFAULT 0.5,
+                    times_applied INTEGER DEFAULT 0,
+                    consensus_contributions INTEGER DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(agent_name, skill_domain)
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS debate_patterns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pattern_type TEXT NOT NULL,
+                    description TEXT,
+                    example_data TEXT,
+                    success_count INTEGER DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS content_references (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    reference_type TEXT NOT NULL,
+                    reference_key TEXT NOT NULL,
+                    reference_summary TEXT NOT NULL,
+                    relevance_score REAL DEFAULT 0.5,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                );
+            """)
+            await db.commit()
+            logger.info(f"Cortex DB inicializado: {DB_PATH}")
+
+    @staticmethod
+    async def save_conversation(conversation_id: str, topic: str, session_id: str = None):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO conversations (id, topic, session_id) VALUES (?, ?, ?);",
+                (conversation_id, topic, session_id)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def save_message(conversation_id: str, agent_name: str, content: str, status: str, turn: int):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO messages (conversation_id, agent_name, content, status, turn) VALUES (?, ?, ?, ?, ?);",
+                (conversation_id, agent_name, content, status, turn)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def update_topic_memory(topic: str, consensus: bool):
+        async with aiosqlite.connect(DB_PATH) as db:
+            existing = await db.execute_fetchall(
+                "SELECT id, times_discussed FROM topic_memory WHERE topic = ?;", (topic,)
+            )
+            if existing:
+                row = existing[0]
+                new_count = row[1] + 1
+                await db.execute(
+                    "UPDATE topic_memory SET times_discussed = ?, last_consensus = ?, last_discussed_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                    (new_count, consensus, row[0])
+                )
+            else:
+                await db.execute(
+                    "INSERT INTO topic_memory (topic, last_consensus, last_discussed_at) VALUES (?, ?, CURRENT_TIMESTAMP);",
+                    (topic, consensus)
+                )
+            await db.commit()
+
+    @staticmethod
+    async def update_agent_skills(agent_name: str, domain: str, contributed_to_consensus: bool):
+        async with aiosqlite.connect(DB_PATH) as db:
+            existing = await db.execute_fetchall(
+                "SELECT id, times_applied, consensus_contributions FROM agent_skills WHERE agent_name = ? AND skill_domain = ?;",
+                (agent_name, domain)
+            )
+            if existing:
+                row = existing[0]
+                new_applied = row[1] + 1
+                new_consensus = row[2] + (1 if contributed_to_consensus else 0)
+                new_level = min(1.0, new_consensus / max(new_applied, 1))
+                await db.execute(
+                    "UPDATE agent_skills SET times_applied = ?, consensus_contributions = ?, expertise_level = ? WHERE id = ?;",
+                    (new_applied, new_consensus, new_level, row[0])
+                )
+            else:
+                await db.execute(
+                    "INSERT INTO agent_skills (agent_name, skill_domain, times_applied, consensus_contributions, expertise_level) VALUES (?, ?, 1, ?, ?);",
+                    (agent_name, domain, 1 if contributed_to_consensus else 0, 1.0 if contributed_to_consensus else 0.0)
+                )
+            await db.commit()
+
+    @staticmethod
+    async def get_discussed_topics() -> List[str]:
+        async with aiosqlite.connect(DB_PATH) as db:
+            rows = await db.execute_fetchall("SELECT topic FROM topic_memory ORDER BY last_discussed_at DESC LIMIT 50;")
+            return [r[0] for r in rows]
+
+    @staticmethod
+    async def get_agent_skills() -> Dict[str, List[Dict]]:
+        async with aiosqlite.connect(DB_PATH) as db:
+            rows = await db.execute_fetchall(
+                "SELECT agent_name, skill_domain, expertise_level FROM agent_skills ORDER BY expertise_level DESC;"
+            )
+            skills: Dict[str, List[Dict]] = {}
+            for name, domain, level in rows:
+                if name not in skills:
+                    skills[name] = []
+                skills[name].append({"domain": domain, "level": level})
+            return skills
+
+# =====================================================================
+# 4. SESSAO - ARQUIVOS JSON
+# =====================================================================
+
+class SessionFiles:
+    """Gerencia arquivos de sessao na pasta sessions/."""
+
+    @staticmethod
+    def get_session_dir(session_id: str) -> Path:
+        now = datetime.now()
+        date_dir = SESSIONS_DIR / now.strftime("%Y-%m-%d")
+        time_dir = date_dir / now.strftime("%H-%M")
+        session_dir = time_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        return session_dir
+
+    @staticmethod
+    async def save_debate(session_dir: Path, debate_num: int, topic: str,
+                          transcript: List[Dict], summary: str = None):
+        debate_dir = session_dir / f"debate_{debate_num:03d}"
+        debate_dir.mkdir(exist_ok=True)
+
+        metadata = {
+            "debate_num": debate_num,
+            "topic": topic,
+            "total_turns": len(transcript),
+            "created_at": datetime.now().isoformat(),
+            "agents": list(set(t["author"] for t in transcript)),
+        }
+        with open(debate_dir / "metadata.json", "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        with open(debate_dir / "transcript.json", "w", encoding="utf-8") as f:
+            json.dump(transcript, f, ensure_ascii=False, indent=2)
+
+        if summary:
+            with open(debate_dir / "summary.json", "w", encoding="utf-8") as f:
+                json.dump({"summary": summary}, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    async def save_session_summary(session_dir: Path, data: Dict):
+        with open(session_dir / "nightly_summary.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+# =====================================================================
+# 5. GERACAO DE TOPICOS PELO OLLAMA
+# =====================================================================
+
+AGENT_DOMAINS = {
+    "Arquiteto": "arquitetura de software",
+    "SRE": "tolerancia a falhas e resiliencia",
+    "DevOps": "CI/CD e infraestrutura",
+    "DBA": "bancos de dados",
+    "Security": "seguranca da informacao",
+    "PO": "produto e valor de negocio",
+    "Scrum Master": "processo e metodologias",
+    "Gerente": "gestao de projetos e riscos",
+}
+
+RESPECT_RULES = (
+    "\n\nREGRAS RIGOROSAS DE DEBATE:\n"
+    "- Responda APENAS ao que foi dito nos turnos anteriores.\n"
+    "- Nao interrompa. Aguarde sua vez.\n"
+    "- Referencie explicitamente o argumento anterior quando contra-argumentar.\n"
+    "- Nao repita o que ja foi dito. Traga novo valor.\n"
+    "- SO discuta sobre: programacao, arquitetura, git, sistemas operacionais, "
+    "lideranca tecnica, problemas humano-computador, devops, bancos de dados, seguranca.\n"
+    "- Se o topico foger desses temas, responda que esta fora do escopo e de CONTINUE.\n"
+    "- Nao seja condescendente: traga numeros, limites de hardware e impactos operacionais."
+)
+
+async def generate_topic(model: str, history_topics: List[str]) -> str:
+    """Pede ao Ollama para sugerir um topico de debate."""
+    already = "\n".join(f"- {t}" for t in history_topics[-30:]) if history_topics else "Nenhum"
+
+    prompt = (
+        "Voce e um gerador de topicos de debate para engenheiros de software. "
+        "Sugira UM topico tecnico relevante e especifico para debate.\n\n"
+        "REGRAS:\n"
+        "- SO sugira sobre: programacao, arquitetura, git, SO, lideranca, "
+        "humano-computador, devops, bancos de dados, seguranca.\n"
+        "- Nao repita topicos ja discutidos.\n"
+        "- Seja especifico (ex: 'Kafka vs RabbitMQ para fila de 10k msgs/s' ao inves de 'messaging').\n"
+        "- Responda APENAS com o topico, sem explicacao ou formatacao.\n\n"
+        f"Topicos ja discutidos:\n{already}\n\n"
+        "Topico sugerido:"
+    )
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "options": {"temperature": 0.8, "num_ctx": 2048}
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=60.0)
+            resp.raise_for_status()
+            topic = resp.json()["message"]["content"].strip().strip('"').strip("'")
+            logger.info(f"Topico gerado por Ollama: {topic}")
+            return topic
+    except Exception as e:
+        logger.error(f"Erro ao gerar topico: {e}")
+        return "Arquitetura de microsservicos vs monolito para APIs de alta demanda"
+
+async def generate_summary(model: str, topics: List[Dict]) -> str:
+    """Gera resumo da sessao noturna."""
+    topics_text = "\n".join(
+        f"- {t['topic']} ({'consenso' if t['consensus'] else 'sem consenso'})"
+        for t in topics
+    )
+
+    prompt = (
+        "Voce e um redator de resumo executivo. Gere um resumo conciso da sessao de debate noturna.\n\n"
+        "FORMATO:\n"
+        "1. Visao Geral (1-2 frases)\n"
+        "2. Topicos Discutidos (lista com resultado)\n"
+        "3. Consensos Alcancados\n"
+        "4. Pontos de Divergencia\n"
+        "5. Decisoes Tecnicas Relevantes\n\n"
+        f"Topicos discutidos:\n{topics_text}\n\n"
+        "Resumo:"
+    )
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "options": {"temperature": 0.3, "num_ctx": 4096}
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=120.0)
+            resp.raise_for_status()
+            return resp.json()["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"Erro ao gerar resumo: {e}")
+        return "Resumo nao disponivel."
+
+# =====================================================================
+# 6. AGENTES
+# =====================================================================
+
+def create_agents(model: str) -> list:
+    """Cria os 8 agentes com o modelo especificado."""
+    configs = [
+        ("Arquiteto", "Software Architect",
+         "Voce e um arquiteto de software pragmatico focado em simplicidade, "
+         "manutenibilidade e custo de infraestrutura (KISS / YAGNI). "
+         "Defenda abordagens diretas e desafie complexidade acidental."),
+        ("SRE", "Site Reliability Engineer",
+         "Voce e um SRE focado em tolerancia a falhas, sistemas distribuidos, "
+         "concorrencia, picos de carga e observabilidade. "
+         "Identifique SPOF, locks de banco e gargalos de escalabilidade."),
+        ("DevOps", "DevOps Engineer",
+         "Voce e um DevOps focado em CI/CD, infraestrutura como codigo, "
+         "automacao, containers e monitoramento. "
+         "Question complexidade de pipelines e custos de infra."),
+        ("DBA", "Database Specialist",
+         "Voce e um especialista em bancos de dados focado em modelagem relacional, "
+         "normalizacao, performance de queries, indexes e concorrencia. "
+         "Question escolhas de NoSQL quando o problema e relacional."),
+        ("Security", "Security Specialist",
+         "Voce e um especialista em seguranca focado em vulnerabilidades, "
+         "autenticacao, autorizacao e boas praticas. "
+         "Aponte riscos de injecao, exposicao de dados e autenticacao fraca."),
+        ("PO", "Product Owner",
+         "Voce e um Product Owner focado em valor de negocio, ROI, "
+         "priorizacao e alinhamento com objetivos estrategicos. "
+         "Question se a solucao tecnica atende ao usuario final."),
+        ("Scrum Master", "Scrum Master",
+         "Voce e um Scrum Master focado em processo, impedimentos "
+         "e fluxo de trabalho. Identifique gargalos de comunicacao."),
+        ("Gerente", "Project Manager",
+         "Voce e um Gerente de Projeto focado em prazo, recursos, "
+         "riscos e orcamento. Aponte impacto em timeline e capacidade da equipe."),
+    ]
+
+    agents = []
+    for name, role, prompt in configs:
+        agent = type("AsyncAgent", (), {
+            "name": name,
+            "role_title": role,
+            "system_prompt": (
+                f"{prompt}\n\n"
+                "DIRETIVAS OBRIGATORIAS:\n"
+                "- Idioma: Responda EXCLUSIVAMENTE em Portugues do Brasil (pt-BR).\n"
+                "- Formato: Responda estritamente no esquema JSON com 'argument' e 'status'.\n"
+                f"{RESPECT_RULES}"
+            ),
+            "model": model,
+        })()
+        agents.append(agent)
+    return agents
+
+# =====================================================================
+# 7. ORQUESTRADOR (FSM)
+# =====================================================================
+
+class MultiAgentEngine:
+    def __init__(self, agents: list, num_ctx: int = 8192, max_turns: int = 18,
+                 min_turns: int = 3):
+        self.agents = agents
+        self.num_ctx = num_ctx
+        self.max_turns = max_turns
+        self.min_turns = min_turns
+
+    async def execute_debate(self, conversation_id: str, topic: str, websocket: WebSocket,
+                             session_id: str = None):
+        await CortexDB.save_conversation(conversation_id, topic, session_id)
+        history: List[Dict[str, str]] = []
+        current_turn = 0
+        consecutive_consensus = 0
+        last_consensus = False
+
+        async with httpx.AsyncClient() as http_client:
+            while current_turn < self.max_turns:
+                for agent in self.agents:
+                    current_turn += 1
+
+                    await websocket.send_json({
+                        "event": "turn_start",
+                        "data": {"turn": current_turn, "agent": agent.name, "role": agent.role_title}
+                    })
+
+                    transcript = [f"[{h['author']} - Turno {h['turn']}]: {h['content']}" for h in history]
+
+                    if current_turn == 1:
+                        instruction = "Voce abre o debate. Apresente sua tese tecnica inicial sobre o problema."
+                    else:
+                        instruction = (
+                            "Analise o argumento do turno anterior e responda de forma critica, "
+                            "apontando pros/contras e trazendo dados concretos."
+                        )
+
+                    user_prompt = (
+                        f"Topico da Discusao: {topic}\n\n"
+                        f"Historico:\n" + ("\n".join(transcript) if transcript else "Inicio do debate.") +
+                        f"\n\n{instruction}\n"
+                        f"Status: 'CONTINUE' para contra-argumentar; 'CONSENSUS' apenas se houver concordancia total."
+                    )
+
+                    payload = {
+                        "model": agent.model,
+                        "messages": [
+                            {"role": "system", "content": agent.system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "stream": False,
+                        "format": AgentDecision.model_json_schema(),
+                        "options": {
+                            "temperature": 0.5,
+                            "repeat_penalty": 1.15,
+                            "num_ctx": self.num_ctx
+                        }
+                    }
+
+                    try:
+                        resp = await http_client.post(OLLAMA_CHAT_URL, json=payload, timeout=180.0)
+                        resp.raise_for_status()
+                        raw_json = resp.json()["message"]["content"]
+                        decision = AgentDecision(**json.loads(raw_json))
+                    except Exception as e:
+                        logger.error(f"Erro turno {current_turn} ({agent.name}): {e}")
+                        decision = AgentDecision(
+                            argument=f"Falha de inferencia no agente {agent.name}.",
+                            status="CONTINUE"
+                        )
+
+                    effective_status = decision.status
+                    if current_turn < self.min_turns and effective_status == "CONSENSUS":
+                        effective_status = "CONTINUE"
+
+                    await CortexDB.save_message(
+                        conversation_id, agent.name, decision.argument, effective_status, current_turn
+                    )
+                    history.append({"author": agent.name, "content": decision.argument, "turn": current_turn})
+
+                    await websocket.send_json({
+                        "event": "turn_end",
+                        "data": {
+                            "turn": current_turn,
+                            "agent": agent.name,
+                            "role": agent.role_title,
+                            "argument": decision.argument,
+                            "status": effective_status
+                        }
+                    })
+
+                    if effective_status == "CONSENSUS":
+                        consecutive_consensus += 1
+                        last_consensus = True
+                    else:
+                        consecutive_consensus = 0
+                        last_consensus = False
+
+                    if consecutive_consensus >= len(self.agents) and current_turn >= self.min_turns:
+                        await websocket.send_json({
+                            "event": "debate_complete",
+                            "data": {"reason": "consensus", "total_turns": current_turn}
+                        })
+                        return last_consensus
+
+                    if current_turn >= self.max_turns:
+                        break
+
+        await websocket.send_json({
+            "event": "debate_complete",
+            "data": {"reason": "max_turns_reached", "total_turns": current_turn}
+        })
+        return last_consensus
+
+# =====================================================================
+# 8. FASTAPI + WEBSOCKET
+# =====================================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    SESSIONS_DIR.mkdir(exist_ok=True)
+    await CortexDB.init()
+    yield
+
+app = FastAPI(title="THz Room - Multi-Agent Autonomous Engine", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+@app.websocket("/ws/debate")
+async def debate_websocket(websocket: WebSocket):
+    await websocket.accept()
+
+    try:
+        raw_payload = await websocket.receive_json()
+
+        mode = raw_payload.get("mode", "single")
+
+        if mode == "single":
+            req = SingleDebateRequest(**raw_payload)
+            model = await resolve_model(req.model)
+            agents = create_agents(model)
+            engine = MultiAgentEngine(agents=agents, num_ctx=req.num_ctx, max_turns=req.max_turns)
+
+            conv_id = str(uuid.uuid4())
+            logger.info(f"[SINGLE] Topico: {req.topic[:60]} | Modelo: {model}")
+            await engine.execute_debate(conv_id, req.topic, websocket)
+            await CortexDB.update_topic_memory(req.topic, True)
+
+        elif mode == "autonomous":
+            req = AutonomousSessionRequest(**raw_payload)
+            model = await resolve_model(req.model)
+            session_id = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            session_dir = SessionFiles.get_session_dir(session_id)
+
+            await websocket.send_json({
+                "event": "session_start",
+                "data": {
+                    "session_id": session_id,
+                    "duration_hours": req.duration_hours,
+                    "model": model
+                }
+            })
+
+            start_time = datetime.now()
+            end_time = start_time + timedelta(hours=req.duration_hours)
+            debate_count = 0
+            topics_used = []
+
+            while datetime.now() < end_time:
+                history_topics = await CortexDB.get_discussed_topics()
+                topic = await generate_topic(model, history_topics + topics_used)
+                debate_count += 1
+
+                await websocket.send_json({
+                    "event": "debate_start",
+                    "data": {"debate_num": debate_count, "topic": topic}
+                })
+
+                conv_id = str(uuid.uuid4())
+                agents = create_agents(model)
+                engine = MultiAgentEngine(agents=agents, num_ctx=req.num_ctx, max_turns=18)
+                consensus = await engine.execute_debate(conv_id, topic, websocket, session_id)
+
+                topics_used.append({"topic": topic, "consensus": consensus})
+                await CortexDB.update_topic_memory(topic, consensus)
+
+                await SessionFiles.save_debate(
+                    session_dir, debate_count, topic,
+                    [{"author": a.get("author", ""), "content": a.get("content", ""), "turn": a.get("turn", 0)}
+                     for a in []],
+                    summary=None
+                )
+
+                if datetime.now() + timedelta(minutes=10) < end_time:
+                    logger.info(f"[PAUSA] 10 minutos antes do proximo debate...")
+                    await asyncio.sleep(600)
+
+            summary_text = await generate_summary(model, topics_used)
+            summary_data = {
+                "session_id": session_id,
+                "total_debates": debate_count,
+                "duration_hours": req.duration_hours,
+                "topics": topics_used,
+                "summary": summary_text,
+                "created_at": datetime.now().isoformat()
+            }
+            await SessionFiles.save_session_summary(session_dir, summary_data)
+
+            await websocket.send_json({
+                "event": "session_complete",
+                "data": {
+                    "session_id": session_id,
+                    "total_debates": debate_count,
+                    "duration_hours": req.duration_hours,
+                    "topics": [t["topic"] for t in topics_used],
+                    "summary": summary_text
+                }
+            })
+
+            logger.info(f"[SESSION] Encerrada. {debate_count} debates. Resumo salvo em {session_dir}")
+
+        else:
+            await websocket.send_json({
+                "event": "error",
+                "data": {"message": f"Modo invalido: {mode}. Use 'single' ou 'autonomous'."}
+            })
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error(f"Erro WebSocket: {exc}")
+    finally:
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
