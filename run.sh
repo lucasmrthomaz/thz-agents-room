@@ -134,8 +134,37 @@ case "$ACTION" in
         show_help
         ;;
     "")
-        # Modo padrao: inicia GUI
-        start_gui
+        # Menu de selecao
+        banner
+        echo -e "${YELLOW}  Escolha o modo:${NC}"
+        echo ""
+        echo -e "    ${CYAN}[1]${NC} GUI Grafica"
+        echo -e "    ${GREEN}[2]${NC} Terminal (CLI)"
+        echo -e "    ${GRAY}[0]${NC} Sair"
+        echo ""
+        read -p "  Opcao: " choice
+
+        case $choice in
+            1) start_gui ;;
+            2)
+                banner
+                echo -e "${YELLOW}  Modo CLI:${NC}"
+                echo "    1 - Debate sob demanda"
+                echo "    2 - Sessao autonoma (noturna)"
+                echo "    0 - Voltar"
+                echo ""
+                read -p "  Opcao: " cli_choice
+
+                case $cli_choice in
+                    1) start_client "" ;;
+                    2) start_autonomous "" ;;
+                    0) echo -e "${GRAY}  Voltando ao menu...${NC}" ;;
+                    *) echo -e "${RED}  Opcao invalida.${NC}" ;;
+                esac
+                ;;
+            0) echo -e "${CYAN}  Adeus!${NC}" ;;
+            *) echo -e "${RED}  Opcao invalida.${NC}" ;;
+        esac
         ;;
     *)
         echo -e "${RED}  Comando invalido: $ACTION${NC}"

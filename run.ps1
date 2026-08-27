@@ -127,7 +127,38 @@ switch ($Action) {
     }
     "help"       { Show-Help }
     ""           {
-        # Modo padrao: inicia GUI
-        Start-GUI
+        # Menu de selecao
+        Show-Banner
+        Write-Host "  Escolha o modo:" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "    [1] GUI Grafica" -ForegroundColor Cyan
+        Write-Host "    [2] Terminal (CLI)" -ForegroundColor Green
+        Write-Host "    [0] Sair" -ForegroundColor Gray
+        Write-Host ""
+
+        $choice = Read-Host "  Opcao"
+
+        switch ($choice) {
+            "1" { Start-GUI }
+            "2" {
+                Show-Banner
+                Write-Host "  Modo CLI:" -ForegroundColor Yellow
+                Write-Host "    1 - Debate sob demanda"
+                Write-Host "    2 - Sessao autonoma (noturna)"
+                Write-Host "    0 - Voltar"
+                Write-Host ""
+
+                $cliChoice = Read-Host "  Opcao"
+
+                switch ($cliChoice) {
+                    "1" { Start-Client -Topic "" }
+                    "2" { Start-Autonomous -Hours 0 }
+                    "0" { Write-Host "  Voltando ao menu..." -ForegroundColor Gray }
+                    default { Write-Host "  Opcao invalida." -ForegroundColor Red }
+                }
+            }
+            "0" { Write-Host "  Adeus!" -ForegroundColor Cyan }
+            default { Write-Host "  Opcao invalida." -ForegroundColor Red }
+        }
     }
 }
