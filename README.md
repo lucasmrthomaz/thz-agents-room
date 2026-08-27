@@ -236,7 +236,7 @@ python -m pytest tests/ -v --cov=.
 
 ## Licenca
 
-MIT
+GPL V3
 
 ---
 
