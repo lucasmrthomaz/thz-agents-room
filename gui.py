@@ -452,10 +452,12 @@ class THZMainsApp:
             tag = "header_green" if reason == "consensus" else "header_yellow"
             self._append_text(f"\n  DEBATE ENCERRADO — {motivo} | Turnos: {data.get('total_turns', '?')}\n", tag)
             self._append_text(f"{'='*70}\n\n", "separator")
-            self.running = False
-            self.start_btn.config(state=tk.NORMAL)
-            self.stop_btn.config(state=tk.DISABLED)
             self._set_status(f"Debate encerrado: {motivo}", ACCENT_GREEN if reason == "consensus" else ACCENT_YELLOW)
+            # No modo autonomous, nao para — espera proximo debate
+            if self.current_mode == "single":
+                self.running = False
+                self.start_btn.config(state=tk.NORMAL)
+                self.stop_btn.config(state=tk.DISABLED)
 
         elif evt == "session_complete":
             self._stop_loading()
