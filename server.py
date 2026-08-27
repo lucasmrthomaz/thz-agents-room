@@ -714,6 +714,8 @@ def create_agents(model: str) -> list:
                 "DIRETIVAS OBRIGATORIAS:\n"
                 "- Idioma: Responda EXCLUSIVAMENTE em Portugues do Brasil (pt-BR).\n"
                 "- Formato: Responda estritamente no esquema JSON com 'argument' e 'status'.\n"
+                "- PLAGIO: NAO copie trechos de outros agentes. Use suas proprias palavras.\n"
+                "- ORIGINALIDADE: Traga argumentos NOVOS baseados na sua expertise.\n"
                 f"{RESPECT_RULES}"
             ),
             "model": model,
@@ -774,6 +776,33 @@ def _is_repetitive(arguments: list, threshold: float = 0.6) -> bool:
     common = keywords_3[0] & keywords_3[1] & keywords_3[2]
     if all_kw and len(common) / len(all_kw) > threshold:
         return True
+
+    return False
+
+
+def _is_plagiarized(argument: str, history: list, threshold: float = 0.3) -> bool:
+    """Detecta se um argumento contem trechos longos copiados de argumentos anteriores.
+    Verifica se frases de 15+ palavras aparecem em argumentos anteriores."""
+    if not history or len(argument.split()) < 20:
+        return False
+
+    arg_lower = argument.lower().strip()
+    history_lower = [h["content"].lower().strip() for h in history]
+
+    # Extrair frases do argumento atual (janelas de 15 palavras)
+    arg_words = arg_lower.split()
+    if len(arg_words) < 15:
+        return False
+
+    # Gerar n-gramas de 15 palavras
+    ngram_size = 15
+    for i in range(len(arg_words) - ngram_size + 1):
+        ngram = " ".join(arg_words[i:i + ngram_size])
+
+        # Verificar se这个 n-gram aparece em algum argumento anterior
+        for prev_arg in history_lower:
+            if ngram in prev_arg:
+                return True
 
     return False
 
@@ -846,7 +875,8 @@ class MultiAgentEngine:
                     else:
                         instruction = (
                             "Analise o argumento do turno anterior e responda de forma critica, "
-                            "apontando pros/contras e trazendo dados concretos."
+                            "apontando pros/contras e trazendo dados concretos. "
+                            "IMPORTANTE: NAO copie trechos de outros agentes. Use suas proprias palavras."
                         )
 
                     user_prompt = (
@@ -894,6 +924,11 @@ class MultiAgentEngine:
                         if _is_repetitive(recent_args):
                             effective_status = "CONSENSUS"
                             logger.info(f"[REPETITION] Turno {current_turn}: espiral de repeticao detectada")
+
+                    # Deteccao de plagio
+                    if len(history) >= 1 and _is_plagiarized(decision.argument, history):
+                        effective_status = "CONSENSUS"
+                        logger.info(f"[PLAGIARISM] Turno {current_turn}: trechos copiados detectados")
 
                     await CortexDB.save_message(
                         conversation_id, agent.name, decision.argument, effective_status, current_turn
