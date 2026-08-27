@@ -101,16 +101,25 @@ class TestTopicGeneration:
             # Deve retornar um topico do fallback
             assert topic in FALLBACK_TOPICS
 
-    async def test_generate_topic_exhausted(self):
-        """Testa retorno None quando topicos estao esgotados."""
-        from server import generate_topic, MAX_TOPICS_WITHOUT_REPEAT
+    async def test_generate_topic_always_returns_topic(self):
+        """Testa que generate_topic sempre retorna um topico (nunca None)."""
+        from server import generate_topic, FALLBACK_TOPICS
 
-        # Cria lista de topicos que esgota o limite
-        history = [f"Topico {i}" for i in range(MAX_TOPICS_WITHOUT_REPEAT + 1)]
+        # Cria lista grande de topicos historicos
+        history = [f"Topico {i}" for i in range(100)]
 
-        topic = await generate_topic("qwen2.5:7b", history)
+        # Mock do Ollama retornando erro para testar fallback
+        with patch('server.httpx.AsyncClient') as mock_client:
+            mock_client.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client.post = AsyncMock(side_effect=Exception("Connection error"))
 
-        assert topic is None
+            topic = await generate_topic("qwen2.5:7b", history)
+
+            # Nunca deve retornar None
+            assert topic is not None
+            assert isinstance(topic, str)
+            assert len(topic) > 0
 
     async def test_generate_topic_json_parse_error(self):
         """Testa fallback quando JSON nao pode ser parseado."""

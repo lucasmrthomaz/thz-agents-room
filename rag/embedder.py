@@ -6,8 +6,10 @@ Gracefully degrades quando modelo nao esta disponivel.
 
 import struct
 import logging
+import time
 import httpx
-from typing import List, Optional
+from typing import List, Optional, Dict
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +19,20 @@ EMBEDDING_DIM = 768
 
 
 class Embedder:
-    """Gerencia embeddings via Ollama."""
+    """Gerencia embeddings via Ollama com cache e rate limiting."""
 
-    def __init__(self, model: str = DEFAULT_MODEL):
+    def __init__(self, model: str = DEFAULT_MODEL, cache_size: int = 500):
         self.model = model
         self.dim = EMBEDDING_DIM
         self.available = None  # None = nao checado, True/False = checado
+        
+        # Cache LRU de embeddings (text -> embedding)
+        self._cache: OrderedDict[str, List[float]] = OrderedDict()
+        self._cache_size = cache_size
+        
+        # Rate limiting
+        self._last_call_time: float = 0
+        self._min_interval: float = 0.5  # Minimo 500ms entre chamadas
 
     async def check_availability(self) -> bool:
         """Verifica se o modelo de embeddings esta disponivel."""
@@ -49,9 +59,25 @@ class Embedder:
         return self.available
 
     async def embed(self, text: str) -> Optional[List[float]]:
-        """Gera embedding de um texto. Retorna None se indisponivel."""
+        """Gera embedding de um texto. Retorna None se indisponivel.
+        Usa cache LRU e rate limiting para evitar chamadas excessivas."""
         if self.available is False:
             return None
+
+        # Verificar cache primeiro
+        cache_key = text[:500]  # Usar primeiros 500 chars como chave
+        if cache_key in self._cache:
+            # Mover para o final (mais recente)
+            self._cache.move_to_end(cache_key)
+            return self._cache[cache_key]
+
+        # Rate limiting: esperar minimo entre chamadas
+        now = time.monotonic()
+        time_since_last = now - self._last_call_time
+        if time_since_last < self._min_interval:
+            await self._async_sleep(self._min_interval - time_since_last)
+
+        self._last_call_time = time.monotonic()
 
         async with httpx.AsyncClient() as client:
             try:
@@ -65,7 +91,14 @@ class Embedder:
                 embeddings = data.get("embeddings", [])
                 if embeddings:
                     self.available = True
-                    return embeddings[0]
+                    embedding = embeddings[0]
+                    
+                    # Adicionar ao cache LRU
+                    if len(self._cache) >= self._cache_size:
+                        self._cache.popitem(last=False)  # Remover mais antigo
+                    self._cache[cache_key] = embedding
+                    
+                    return embedding
                 return None
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
@@ -77,6 +110,12 @@ class Embedder:
             except Exception as e:
                 logger.error(f"[EMBED] Erro ao gerar embedding: {e}")
                 return None
+
+    @staticmethod
+    async def _async_sleep(seconds: float):
+        """Sleep assíncrono."""
+        import asyncio
+        await asyncio.sleep(seconds)
 
     async def embed_batch(self, texts: List[str], batch_size: int = 32) -> List[Optional[List[float]]]:
         """Gera embeddings de varios textos em batch."""

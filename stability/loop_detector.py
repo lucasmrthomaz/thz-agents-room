@@ -13,12 +13,12 @@ logger = logging.getLogger(__name__)
 class LoopDetector:
     """Detecta loops e analisa saude do debate."""
 
-    # Thresholds
-    DIVERSITY_LOW = 0.3
+    # Thresholds (reduzidos para ser menos agressivo)
+    DIVERSITY_LOW = 0.25
     DIVERSITY_MEDIUM = 0.5
     STAGNANT_TURNS = 6
-    REPETITION_LIMIT = 5
-    PLAGIARISM_LIMIT = 3
+    REPETITION_LIMIT = 8
+    PLAGIARISM_LIMIT = 5
 
     def analyze_debate_health(self, history: List[Dict]) -> Dict:
         """Analisa saude completa do debate."""

@@ -15,12 +15,13 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import aiosqlite
 import httpx
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -29,6 +30,18 @@ from stability.context_manager import ContextManager
 from stability.loop_detector import LoopDetector
 from stability.quality_monitor import QualityMonitor
 from rag.semantic_search import SemanticSearch
+from tools import get_tool_registry
+from export import ReportGenerator
+from guardrails import ScopeGuard, get_scope_guard, get_sandbox
+from teamwork import (
+    EngineeringPipeline,
+    ContentPipeline,
+    TeamworkSessionRequest,
+    TeamworkSessionResult,
+    WorkspaceManager,
+    TeamworkMode,
+)
+from scenarios import get_scenario_engine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,12 +100,59 @@ shutdown_manager = GracefulShutdown()
 # 1. ESQUEMAS DE DADOS
 # =====================================================================
 
+from enum import Enum
+
+class ActionType(Enum):
+    """Categorias de ação com níveis de segurança diferentes."""
+    READ_ONLY = "read_only"      # Gerar texto, ler DB — permitido
+    WRITE_DB = "write_db"        # Salvar mensagem — permitido
+    CONSENSUS = "consensus"      # Marcar consenso — requer validação
+    DELEGATE = "delegate"         # Delegar tarefa — requer validação
+    DANGEROUS = "dangerous"      # Deletar, modificar config — BLOQUEADO sem humano
+
+
+async def requires_human_approval(action: ActionType, context: dict = None) -> bool:
+    """Determina se uma ação requer aprovação humana."""
+    if action == ActionType.DANGEROUS:
+        return True  # Sempre requer humano
+    if action == ActionType.CONSENSUS:
+        # Tópicos muito discutidos precisam de aprovação
+        times_discussed = (context or {}).get("times_discussed", 0)
+        return times_discussed > 3
+    if action == ActionType.DELEGATE:
+        return True  # Sempre requer humano
+    return False
+
+
+async def calculate_vote_weight(agent_name: str, all_agent_skills: dict) -> float:
+    """Calcula peso de voto de um agente baseado na sua expertise."""
+    if agent_name in all_agent_skills:
+        skills = all_agent_skills[agent_name]
+        if skills:
+            avg_expertise = sum(s.get("expertise_level", 0.5) for s in skills) / len(skills)
+            # Peso entre 0.5 (iniciante) e 1.0 (expert)
+            return min(1.0, 0.5 + (avg_expertise * 0.5))
+    return 0.5  # Peso padrão
+
+
 class AgentDecision(BaseModel):
     argument: str = Field(
         description="Argumento tecnico detalhado em Portugues do Brasil (pt-BR)."
     )
     status: Literal["CONTINUE", "CONSENSUS", "FORCE_STOP"] = Field(
-        description="CONTINUE para manter a discusao; CONSENSUS apenas em caso de acordo total; FORCE_STOP quando o sistema forca parada."
+        description="CONTINUE para manter a discusao; CONSENSUS quando concordar com a maioria dos pontos principais; FORCE_STOP quando o sistema forca parada."
+    )
+    question_to: Optional[str] = Field(
+        default=None,
+        description="Nome do agente alvo (ex: 'SRE'), se tiver duvida sobre argumento dele. Null se sem pergunta."
+    )
+    reasoning: Optional[str] = Field(
+        default=None,
+        description="Raciocinio interno antes de responder (nao enviado ao debate). Analise o que foi dito, dados concretos, se concorda com a maioria."
+    )
+    tool_call: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Chamada opcional de ferramenta para enriquecer a analise: {'tool': 'web_search'|'db_query'|'file_read'|'code_execute', 'params': {...}}"
     )
 
 class SingleDebateRequest(BaseModel):
@@ -257,13 +317,75 @@ class CortexDB:
                     agent_name TEXT NOT NULL,
                     topic TEXT NOT NULL,
                     embedding BLOB NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS argument_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT,
+                    conversation_id TEXT,
+                    agent_name TEXT,
+                    quality_score REAL,
+                    novelty_score REAL,
+                    expertise_alignment REAL,
+                    overall_score REAL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS debate_state (
+                    conversation_id TEXT PRIMARY KEY,
+                    topic TEXT,
+                    current_turn INTEGER,
+                    history_json TEXT,
+                    status TEXT DEFAULT 'active',
+                    session_id TEXT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_graph (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_topic TEXT NOT NULL,
+                    target_topic TEXT NOT NULL,
+                    relationship TEXT DEFAULT 'similar',
+                    strength REAL DEFAULT 0.8,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS teamwork_sessions (
+                    id TEXT PRIMARY KEY,
+                    project_name TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    goal TEXT NOT NULL,
+                    status TEXT DEFAULT 'completed',
+                    output_dir TEXT NOT NULL,
+                    executive_summary TEXT,
+                    total_steps INTEGER DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS teamwork_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    project_name TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_type TEXT,
+                    author_role TEXT,
+                    content_length INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
             """)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_emb_agent ON argument_embeddings(agent_name);")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_emb_topic ON argument_embeddings(topic);")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_emb_message ON argument_embeddings(message_id);")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_kg_source ON knowledge_graph(source_topic);")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_kg_target ON knowledge_graph(target_topic);")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tw_session ON teamwork_artifacts(session_id);")
             await db.commit()
             logger.info(f"Cortex DB inicializado: {DB_PATH}")
 
@@ -296,6 +418,66 @@ class CortexDB:
             await db.commit()
 
     @staticmethod
+    async def save_teamwork_session(
+        session_id: str, project_name: str, mode: str, goal: str,
+        output_dir: str, executive_summary: str, total_steps: int,
+        artifacts: list = None, status: str = "completed"
+    ):
+        """Salva a sessão de Teamwork e seus artefatos no Cortex DB."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO teamwork_sessions
+                    (id, project_name, mode, goal, status, output_dir, executive_summary, total_steps)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """, (session_id, project_name, mode, goal, status, output_dir, executive_summary, total_steps))
+
+            if artifacts:
+                for art in artifacts:
+                    path = art.get("path") if isinstance(art, dict) else getattr(art, "path", str(art))
+                    f_type = art.get("file_type") if isinstance(art, dict) else getattr(art, "file_type", "")
+                    role = art.get("author_role") if isinstance(art, dict) else getattr(art, "author_role", "")
+                    content = art.get("content") if isinstance(art, dict) else getattr(art, "content", "")
+                    c_len = len(content) if content else 0
+                    await db.execute("""
+                        INSERT INTO teamwork_artifacts
+                            (session_id, project_name, file_path, file_type, author_role, content_length)
+                        VALUES (?, ?, ?, ?, ?, ?);
+                    """, (session_id, project_name, path, f_type, role, c_len))
+
+            await db.commit()
+
+    @staticmethod
+    async def get_recent_teamwork_sessions(limit: int = 30) -> List[Dict]:
+        """Retorna sessões recentes de Teamwork com seus artefatos associados."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            rows = await db.execute_fetchall("""
+                SELECT id, project_name, mode, goal, status, output_dir, executive_summary, total_steps, created_at
+                FROM teamwork_sessions
+                ORDER BY created_at DESC LIMIT ?;
+            """, (limit,))
+            results = []
+            for r in rows:
+                s_id = r[0]
+                art_rows = await db.execute_fetchall("""
+                    SELECT file_path, file_type, author_role, content_length FROM teamwork_artifacts WHERE session_id = ?;
+                """, (s_id,))
+                files = [{"path": a[0], "file_type": a[1], "author_role": a[2], "size_bytes": a[3]} for a in art_rows]
+                results.append({
+                    "session_id": s_id,
+                    "project_name": r[1],
+                    "mode": r[2],
+                    "goal": r[3],
+                    "status": r[4],
+                    "output_dir": r[5],
+                    "executive_summary": r[6],
+                    "total_steps": r[7],
+                    "created_at": r[8],
+                    "files": files,
+                    "total_files": len(files)
+                })
+            return results
+
+    @staticmethod
     async def update_topic_memory(topic: str, consensus: bool):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -320,6 +502,60 @@ class CortexDB:
                     expertise_level = CAST(consensus_contributions + excluded.consensus_contributions AS REAL) / (times_applied + 1);
             """, (agent_name, domain, 1 if contributed_to_consensus else 0, 1.0 if contributed_to_consensus else 0.0))
             await db.commit()
+
+    @staticmethod
+    async def save_argument_score(
+        message_id: str, conversation_id: str, agent_name: str,
+        quality_score: float, novelty_score: float,
+        expertise_alignment: float, overall_score: float
+    ):
+        """Persiste scores de qualidade de um argumento."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO argument_scores
+                    (message_id, conversation_id, agent_name, quality_score, novelty_score, expertise_alignment, overall_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+            """, (message_id, conversation_id, agent_name, quality_score, novelty_score, expertise_alignment, overall_score))
+            await db.commit()
+
+    @staticmethod
+    async def save_debate_state(
+        conversation_id: str, topic: str, current_turn: int,
+        history: list, status: str = "active", session_id: str = None
+    ):
+        """Salva estado do debate para retomada posterior."""
+        import json
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO debate_state (conversation_id, topic, current_turn, history_json, status, session_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    current_turn = excluded.current_turn,
+                    history_json = excluded.history_json,
+                    status = excluded.status,
+                    updated_at = CURRENT_TIMESTAMP;
+            """, (conversation_id, topic, current_turn, json.dumps(history, ensure_ascii=False), status, session_id))
+            await db.commit()
+
+    @staticmethod
+    async def get_debate_state(conversation_id: str) -> Optional[Dict]:
+        """Recupera estado de um debate pausado."""
+        import json
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT topic, current_turn, history_json, status, session_id FROM debate_state WHERE conversation_id = ?",
+                (conversation_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                return {
+                    "topic": row[0],
+                    "current_turn": row[1],
+                    "history": json.loads(row[2]) if row[2] else [],
+                    "status": row[3],
+                    "session_id": row[4]
+                }
+            return None
 
     @staticmethod
     async def get_discussed_topics() -> List[str]:
@@ -386,10 +622,31 @@ class CortexDB:
     @staticmethod
     async def retrieve_knowledge(topic: str, limit: int = 5) -> List[Dict]:
         """Busca conhecimento relevante de debates anteriores sobre o topico.
-        Retorna os argumentos mais relevantes de debates passados."""
+        Tenta busca semantica primeiro; fallback para SQL LIKE."""
+        # Tentar busca semantica primeiro
+        try:
+            from rag.semantic_search import SemanticSearch
+            semantic = SemanticSearch()
+            resultados = await semantic.buscar_argumentos_similares(topic, top_k=limit)
+            if resultados:
+                return [
+                    {
+                        "agent": r.get("agent_name", ""),
+                        "content": r.get("content", ""),
+                        "status": r.get("status", ""),
+                        "topic": r.get("topic", topic),
+                        "created_at": r.get("created_at", "")
+                    }
+                    for r in resultados
+                ]
+        except Exception as e:
+            logger.debug(f"[RAG] Busca semantica falhou, usando fallback: {e}")
+
+        # Fallback: SQL LIKE (sem filtro CONSENSUS)
         async with aiosqlite.connect(DB_PATH) as db:
-            # Busca debates com topicos similares (LIKE)
-            topic_words = topic.split()
+            topic_words = [w for w in topic.split() if len(w) > 3]
+            if not topic_words:
+                topic_words = topic.split()
             like_conditions = " OR ".join(["c.topic LIKE ?" for _ in topic_words])
             like_params = [f"%{w}%" for w in topic_words]
 
@@ -403,7 +660,6 @@ class CortexDB:
                 FROM messages m
                 JOIN conversations c ON c.id = m.conversation_id
                 WHERE ({like_conditions})
-                AND m.status = 'CONSENSUS'
                 ORDER BY c.created_at DESC
                 LIMIT ?;
             """, (*like_params, limit))
@@ -655,39 +911,38 @@ FALLBACK_TOPICS = [
     "Fluxo de trabalho: quando o processo atrapalha?",
 ]
 
-# Limite maximo de topicos antes de considerar esgotados
-MAX_TOPICS_WITHOUT_REPEAT = 50
+def is_too_similar(new_topic: str, recent_topics: List[str], threshold: float = 0.55) -> bool:
+    """Verifica se o tópico é muito similar a qualquer um dos tópicos recentes."""
+    from difflib import SequenceMatcher
+    normalized_new = new_topic.lower().strip()
+    for old_topic in recent_topics:
+        similarity = SequenceMatcher(None, normalized_new, old_topic.lower().strip()).ratio()
+        if similarity >= threshold:
+            return True
+    return False
 
-async def generate_topic(model: str, history_topics: List[str]) -> Optional[str]:
-    """Pede ao Ollama para sugerir um topico de debate. Retorna None se topicos esgotados."""
+
+async def generate_topic(model: str, history_topics: List[str]) -> str:
+    """Pede ao Ollama para sugerir um topico de debate. Sempre gera novos topicos dinamicamente."""
     import random
 
-    # Verifica se topicos estao esgotados
-    if len(history_topics) >= MAX_TOPICS_WITHOUT_REPEAT:
-        logger.warning(f"[TOPICOS] Esgotados! {len(history_topics)} topicos ja discutidos.")
-        return None
-
-    # Se ja tem muitos topicos, mistura fallback com geracao
-    if len(history_topics) >= 20:
-        used = set(history_topics[-30:])
-        available = [t for t in FALLBACK_TOPICS if t not in used]
-        if available:
-            topic = random.choice(available)
-            logger.info(f"[TOPICOS] Fallback: {topic}")
-            return topic
-        # Todos os fallbacks usados, tenta gerar novos
-        pass
-
-    already = "\n".join(f"- {t}" for t in history_topics[-20:]) if history_topics else "Nenhum"
+    already = "\n".join(f"- {t}" for t in history_topics[-30:]) if history_topics else "Nenhum"
 
     prompt = (
-        "Sugira UM topico de debate tecnico para engenheiros de software.\n"
+        "Sugira UM topico de debate tecnico ORIGINAL e INTERESSANTE para engenheiros de software.\n"
         "Responda SOMENTE com o topico. Nao explique.\n"
+        "Seja criativo - pense em topicos atuais, controversos, ou comparacoes nao obvias.\n"
+        "IMPORTANTE: Varie a ESTRUTURA do topico. Nao use sempre o mesmo formato.\n"
+        "Alterne entre: comparacoes diretas (X vs Y), perguntas, analises criticas,\n"
+        "tendencias emergentes, decisoes de arquitetura, trade-offs, retrospectivas.\n"
         "Exemplos de bons topicos:\n"
         "- Kafka vs RabbitMQ para fila de eventos\n"
         "- Quando usar Redis ao inves de PostgreSQL\n"
-        "- Git flow vs trunk-based development\n\n"
-        f"Topicos ja usados:\n{already}\n\n"
+        "- Git flow vs trunk-based development\n"
+        "- AI pair programming: produtividade ou dependencia?\n"
+        "- Microservicos: quando realmente precisa?\n"
+        "- TypeScript e JavaScript: vale o trade-off?\n\n"
+        f"Topicos ja discutidos (EVITE repetir e varie a estrutura):\n{already}\n\n"
         "Topico:"
     )
 
@@ -696,7 +951,7 @@ async def generate_topic(model: str, history_topics: List[str]) -> Optional[str]
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "format": {"type": "object", "properties": {"topic": {"type": "string"}}, "required": ["topic"]},
-        "options": {"temperature": 0.7, "num_ctx": 1024}
+        "options": {"temperature": 0.9, "num_ctx": 1024}
     }
 
     try:
@@ -712,17 +967,25 @@ async def generate_topic(model: str, history_topics: List[str]) -> Optional[str]
                 topic = raw.strip().strip('"').strip("'").strip()
 
             if 10 <= len(topic) <= 150 and not topic.startswith("{"):
+                if is_too_similar(topic, history_topics[-30:]):
+                    logger.warning(f"[TOPICOS] Similar demais: {topic[:60]}...")
+                    if available := [t for t in FALLBACK_TOPICS
+                                     if not is_too_similar(t, history_topics[-30:])]:
+                        return random.choice(available)
+                    return topic
                 logger.info(f"[TOPICOS] Ollama: {topic}")
                 return topic
             else:
                 logger.warning(f"[TOPICOS] Invalido: {topic[:80]}...")
-                if available := [t for t in FALLBACK_TOPICS if t not in set(history_topics[-30:])]:
+                if available := [t for t in FALLBACK_TOPICS
+                                 if not is_too_similar(t, history_topics[-30:])]:
                     return random.choice(available)
                 return random.choice(FALLBACK_TOPICS)
 
     except Exception as e:
         logger.error(f"[TOPICOS] Erro ao gerar: {e}")
-        if available := [t for t in FALLBACK_TOPICS if t not in set(history_topics[-30:])]:
+        if available := [t for t in FALLBACK_TOPICS
+                         if not is_too_similar(t, history_topics[-30:])]:
             return random.choice(available)
         return random.choice(FALLBACK_TOPICS)
 
@@ -860,8 +1123,27 @@ async def generate_full_summary(model: str, topic: str, history: List[Dict],
 # 6. AGENTES
 # =====================================================================
 
-def create_agents(model: str) -> list:
-    """Cria os 9 agentes com o modelo especificado."""
+# Modelos padrão por agente (podem ser sobrescritos via config)
+DEFAULT_AGENT_MODELS = {
+    "Arquiteto": None,   # Usa o modelo global
+    "SRE": None,
+    "DevOps": None,
+    "DBA": None,
+    "Security": None,
+    "PO": None,
+    "Scrum Master": None,
+    "Gerente": None,
+    "Dev Senior": None,
+}
+
+
+def create_agents(model: str, agent_models: dict = None) -> list:
+    """Cria os 9 agentes com o modelo especificado.
+    
+    Args:
+        model: Modelo padrão para todos os agentes
+        agent_models: Dict opcional {nome_agente: modelo} para override por agente
+    """
     configs = [
         ("Arquiteto", "Software Architect",
          "Voce e um arquiteto de software pragmatico focado em simplicidade, "
@@ -901,6 +1183,8 @@ def create_agents(model: str) -> list:
 
     agents = []
     for name, role, prompt in configs:
+        # Usar modelo por agente se configurado, senão usar o global
+        agent_model = (agent_models or {}).get(name) or model
         agent = type("AsyncAgent", (), {
             "name": name,
             "role_title": role,
@@ -910,16 +1194,26 @@ def create_agents(model: str) -> list:
                 "- Idioma: Responda EXCLUSIVAMENTE em Portugues do Brasil (pt-BR).\n"
                 "  PROIBIDO: chines, japones, arabe, coreano, russo, ou qualquer idioma que nao seja portugues.\n"
                 "  Se voce gerar texto em outro idioma, o debate sera ENCERRADO IMEDIATAMENTE.\n"
-                "- Formato: Responda estritamente no esquema JSON com 'argument' e 'status'.\n"
+                "- Formato: Responda estritamente no esquema JSON com 'argument', 'status', 'question_to' e 'reasoning'.\n"
+                "- RACIOCINIO: Preencha 'reasoning' com sua analise interna antes de responder.\n"
+                "  Analise: 1) O que foi dito, 2) Dados concretos, 3) Se concorda com a maioria, 4) O que falta mencionar.\n"
+                "- PERGUNTAS: Se tiver DUVIDA sobre argumento de outro agente, use 'question_to' com o nome dele.\n"
+                "  Formato: question_to = 'NomeDoAgente'. O agente sera instruido a responder sua pergunta.\n"
                 "- PLAGIO ABSOLUTAMENTE PROIBIDO: NAO copie, NAO repita, NAO parafraseie trechos de outros agentes.\n"
                 "  Se voce copiar, o debate sera encerrado imediatamente.\n"
                 "- ORIGINALIDADE: Traga argumentos COMPLETAMENTE NOVOS baseados na sua expertise.\n"
                 "  Cada resposta deve conter ideias que NAO foram mencionadas por ninguem antes.\n"
                 "- DADOS CONCRETOS: Traga numeros, metricas, exemplos reais, fonts especificas.\n"
                 "- SUA ROLE: Fale APENAS sobre sua area de expertise. NAO discuta topicos de outros agentes.\n"
+                "- CONSENSUS: Responda 'CONSENSUS' quando:\n"
+                "  1) Voce concorda com a maioria dos pontos principais do debate\n"
+                "  2) Os argumentos principais ja foram apresentados e discutidos\n"
+                "  3) Nao ha objecoes criticas restantes\n"
+                "  Nao e necessario concordar com TUDO. Basta concordar com o GERAL.\n"
+                "  Se 3 ou mais agentes ja concordaram, considere seriamente CONSENSUS.\n"
                 f"{RESPECT_RULES}"
             ),
-            "model": model,
+            "model": agent_model,
         })()
         agents.append(agent)
     return agents
@@ -928,20 +1222,22 @@ def create_agents(model: str) -> list:
 # 7. ORQUESTRADOR (FSM)
 # =====================================================================
 
-def _is_repetitive(arguments: list, threshold: float = 0.6) -> bool:
+CONSENSUS_THRESHOLD = 4  # Maioria simples de 9 agentes para consenso
+
+def _is_repetitive(arguments: list, threshold: float = 0.65) -> bool:
     """Detecta espiral de repeticao no debate.
     Verifica janelas de 3, 4 e 5 argumentos com threshold progressivo."""
-    if len(arguments) < 3:
+    if len(arguments) < 5:
         return False
 
     # Normalizar argumentos
     normalized = [a.lower().strip() for a in arguments]
 
-    # Verificar frases repetidas (primeiras 50 chars sao muito similares)
+    # Verificar frases repetidas (primeiras 120 chars sao muito similares)
     for i in range(len(normalized) - 2):
-        chunk = normalized[i][:50]
+        chunk = normalized[i][:120]
         for j in range(i + 1, len(normalized)):
-            if normalized[j][:50] == chunk and chunk:
+            if normalized[j][:120] == chunk and chunk:
                 return True
 
     # Verificar por palavras-chave repetidas (topicos principais)
@@ -958,7 +1254,7 @@ def _is_repetitive(arguments: list, threshold: float = 0.6) -> bool:
         keywords_5 = [get_keywords(a) for a in last_5]
         all_kw = set().union(*keywords_5)
         common = keywords_5[0] & keywords_5[1] & keywords_5[2] & keywords_5[3] & keywords_5[4]
-        if all_kw and len(common) / len(all_kw) > 0.5:
+        if all_kw and len(common) / len(all_kw) > 0.55:
             return True
 
     # Verificar janela de 4 argumentos
@@ -967,7 +1263,7 @@ def _is_repetitive(arguments: list, threshold: float = 0.6) -> bool:
         keywords_4 = [get_keywords(a) for a in last_4]
         all_kw = set().union(*keywords_4)
         common = keywords_4[0] & keywords_4[1] & keywords_4[2] & keywords_4[3]
-        if all_kw and len(common) / len(all_kw) > 0.55:
+        if all_kw and len(common) / len(all_kw) > 0.6:
             return True
 
     # Verificar janela de 3 argumentos (original, mas mais flexivel)
@@ -983,17 +1279,17 @@ def _is_repetitive(arguments: list, threshold: float = 0.6) -> bool:
 
 def _is_plagiarized(argument: str, history: list, threshold: float = 0.3) -> bool:
     """Detecta se um argumento contem trechos copiados de argumentos anteriores.
-    Verifica frases de 8+ palavras E frases inteiras similares."""
+    Verifica frases de 12+ palavras E frases inteiras similares."""
     if not history or len(argument.split()) < 10:
         return False
 
     arg_lower = argument.lower().strip()
     history_lower = [h["content"].lower().strip() for h in history]
 
-    # 1. Verificar n-gramas de 8 palavras (mais agressivo)
+    # 1. Verificar n-gramas de 12 palavras (menos agressivo)
     arg_words = arg_lower.split()
-    if len(arg_words) >= 8:
-        ngram_size = 8
+    if len(arg_words) >= 12:
+        ngram_size = 12
         for i in range(len(arg_words) - ngram_size + 1):
             ngram = " ".join(arg_words[i:i + ngram_size])
             for prev_arg in history_lower:
@@ -1009,13 +1305,13 @@ def _is_plagiarized(argument: str, history: list, threshold: float = 0.3) -> boo
                 # Frase identical ou quase identical
                 if arg_sent == prev_sent:
                     return True
-                # 90% similar (substituicoes minimas)
+                # 95% similar (substituicoes minimas)
                 if len(arg_sent) > 30 and len(prev_sent) > 30:
                     words_a = set(arg_sent.split())
                     words_p = set(prev_sent.split())
                     if words_a and words_p:
                         overlap = len(words_a & words_p) / max(len(words_a), len(words_p))
-                        if overlap > 0.9:
+                        if overlap > 0.95:
                             return True
 
     return False
@@ -1050,7 +1346,7 @@ def _is_valid_portuguese(text: str) -> bool:
 
 class MultiAgentEngine:
     def __init__(self, agents: list, num_ctx: int = 8192, max_turns: int = 48,
-                 min_turns: int = 3):
+                 min_turns: int = 2):
         self.agents = agents
         self.num_ctx = num_ctx
         self.max_turns = max_turns
@@ -1084,7 +1380,7 @@ class MultiAgentEngine:
                     "message": f"Topico '{topic}' ja foi discutido {topic_history['times_discussed']} vezes. Tente um topico diferente."
                 }
             })
-            return
+            return False, "", ""
 
         # Construir contexto de conhecimento previo (RAG)
         knowledge_context = ""
@@ -1099,6 +1395,15 @@ class MultiAgentEngine:
             knowledge_context += f"- Discutido {topic_history['times_discussed']} vez(es) anteriormente\n"
             knowledge_context += f"- Ultimo resultado: {'Consenso' if topic_history['last_consensus'] else 'Sem consenso'}\n"
             knowledge_context += f"- Ultima discussao: {topic_history['last_discussed_at']}\n"
+
+        # Carregar skills dos agentes para injetar no prompt
+        try:
+            all_agent_skills = await CortexDB.get_agent_skills()
+        except Exception:
+            all_agent_skills = {}
+
+        # Lista de perguntas pendentes entre agentes
+        pending_questions = []
 
         # Auto-expand num_ctx se necessario
         estimated_tokens = self.context_manager.estimate_tokens(topic) + 500  # overhead
@@ -1135,6 +1440,25 @@ class MultiAgentEngine:
                             "Traga uma analise COMPLETAMENTE NOVA com dados da sua area de expertise."
                         )
 
+                    # Consenso forçado nos últimos turnos
+                    turns_remaining = self.max_turns - current_turn
+                    if turns_remaining <= 3 and current_turn >= self.min_turns:
+                        instruction += (
+                            "\n\nIMPORTANTE: O debate esta terminando. Se concordar com a maioria "
+                            "dos pontos principais, responda CONSENSUS. Nao e necessario concordar com tudo."
+                        )
+                    elif current_turn > self.min_turns:
+                        # Após min_turns, instruir a considerar consenso
+                        consensus_count = sum(
+                            1 for h in history[-9:]
+                            if h.get("status") == "CONSENSUS"
+                        )
+                        if consensus_count >= 2:
+                            instruction += (
+                                f"\n\nNOTA: {consensus_count} agentes ja concordaram. "
+                                "Se voce tambem concorda com os pontos principais, responda CONSENSUS."
+                            )
+
                     # Knowledge context via RAG (substitui busca por substring)
                     try:
                         rag_context = await self.semantic_search.construir_knowledge_context(
@@ -1150,12 +1474,39 @@ class MultiAgentEngine:
                         health, agent.role_title, instruction
                     )
 
+                    # Injetar skills do agente no contexto
+                    agent_specific_context = knowledge_context
+                    if agent.name in all_agent_skills:
+                        skills = all_agent_skills[agent.name]
+                        skills_text = "\n".join(
+                            f"- {s['skill_domain']}: nivel {s['expertise_level']:.1f}"
+                            for s in skills
+                        )
+                        agent_specific_context += f"\n\n## Suas areas de expertise (baseado em debates anteriores):\n{skills_text}\n"
+
+                    # Injetar peso de voto do agente
+                    vote_weight = await calculate_vote_weight(agent.name, all_agent_skills)
+                    agent_specific_context += f"\n\nSeu peso de voto: {vote_weight:.1f} (baseado na sua expertise).\n"
+
+                    # Pergunta pendente de outro agente
+                    pending_question = next(
+                        (q for q in pending_questions if q["to"] == agent.name),
+                        None
+                    )
+                    if pending_question:
+                        agent_specific_context += (
+                            f"\n\n## PERGUNTA DE {pending_question['from']}:\n"
+                            f"{pending_question['question']}\n"
+                            f"Responda diretamente a essa pergunta. Se satisfatoria, considere CONSENSUS.\n"
+                        )
+
                     user_prompt = (
                         f"Topico da Discusao: {topic}\n\n"
                         f"Historico:\n" + ("\n".join(transcript) if transcript else "Inicio do debate.") +
-                        f"\n\n{knowledge_context}\n"
+                        f"\n\n{agent_specific_context}\n"
                         f"\n{instruction}\n"
-                        f"Status: 'CONTINUE' para contra-argumentar; 'CONSENSUS' apenas se houver concordancia total."
+                        f"Status: 'CONTINUE' para contra-argumentar; 'CONSENSUS' quando concordar com a maioria dos pontos principais.\n"
+                        f"IMPORTANTE: Apos {self.min_turns} turnos, se voce concorda com o geral, digite CONSENSUS."
                     )
 
                     payload = {
@@ -1226,9 +1577,9 @@ class MultiAgentEngine:
                     if current_turn < self.min_turns and effective_status == "CONSENSUS":
                         effective_status = "CONTINUE"
 
-                    # Deteccao de repeticao do LLM
-                    if len(history) >= 3:
-                        recent_args = [h["content"] for h in history[-5:]] if len(history) >= 5 else [h["content"] for h in history[-3:]]
+                    # Deteccao de repeticao do LLM (so apos 5+ argumentos)
+                    if len(history) >= 5:
+                        recent_args = [h["content"] for h in history[-5:]]
                         if _is_repetitive(recent_args):
                             effective_status = "FORCE_STOP"
                             logger.info(f"[REPETITION] Turno {current_turn}: espiral de repeticao detectada")
@@ -1256,10 +1607,63 @@ class MultiAgentEngine:
                     if quality.get("is_too_short"):
                         logger.info(f"[QUALITY] Turno {current_turn}: argumento muito curto ({quality['word_count']} palavras)")
 
+                    # Persistir scores de qualidade
+                    try:
+                        msg_id = str(uuid.uuid4())
+                        await CortexDB.save_argument_score(
+                            message_id=msg_id,
+                            conversation_id=conversation_id,
+                            agent_name=agent.name,
+                            quality_score=quality.get("novelty_score", 0.5),
+                            novelty_score=quality.get("novelty_score", 0.5),
+                            expertise_alignment=quality.get("expertise_alignment", 0.5),
+                            overall_score=quality.get("overall_score", 0.5)
+                        )
+                    except Exception:
+                        pass
+
+                    # Rejeitar argumentos de baixa qualidade (apos min_turns)
+                    if quality.get("overall_score", 1.0) < 0.2 and current_turn > self.min_turns:
+                        effective_status = "CONTINUE"
+                        logger.info(f"[QUALITY] Turno {current_turn}: argumento rejeitado (score={quality.get('overall_score', 0):.2f})")
+
                     await CortexDB.save_message(
                         conversation_id, agent.name, decision.argument, effective_status, current_turn
                     )
                     history.append({"author": agent.name, "content": decision.argument, "turn": current_turn})
+
+                    # Processar pergunta para outro agente
+                    if decision.question_to and decision.question_to != agent.name:
+                        pending_questions.append({
+                            "from": agent.name,
+                            "to": decision.question_to,
+                            "question": decision.argument,
+                            "turn": current_turn
+                        })
+                        logger.info(f"[QUESTION] Turno {current_turn}: {agent.name} perguntou para {decision.question_to}")
+
+                    # Auto-indexar embedding da mensagem (RAG) - apenas a cada 10 turnos
+                    if current_turn % 10 == 0:
+                        try:
+                            await self.semantic_search.indexar_argumentos_pendentes()
+                        except Exception:
+                            pass  # Non-critical
+
+                    # Atualizar skills do agente se contribuiu para consenso
+                    if effective_status == "CONSENSUS":
+                        try:
+                            await CortexDB.update_agent_skills(agent.name, topic, True)
+                        except Exception:
+                            pass
+
+                    # Auto-salvar estado do debate a cada 5 turnos
+                    if current_turn % 5 == 0:
+                        try:
+                            await CortexDB.save_debate_state(
+                                conversation_id, topic, current_turn, history, "active", session_id
+                            )
+                        except Exception:
+                            pass
 
                     await websocket.send_json({
                         "event": "turn_end",
@@ -1298,7 +1702,38 @@ class MultiAgentEngine:
                         consecutive_consensus = 0
                         last_consensus = False
 
-                    if consecutive_consensus >= len(self.agents) and current_turn >= self.min_turns:
+                    if consecutive_consensus >= CONSENSUS_THRESHOLD and current_turn >= self.min_turns:
+                        # Verificar se consenso requer aprovação humana
+                        topic_context = {"times_discussed": topic_history.get("times_discussed", 0) if topic_history else 0}
+                        needs_human = await requires_human_approval(ActionType.CONSENSUS, topic_context)
+
+                        if needs_human:
+                            # Enviar evento de validação humana
+                            await websocket.send_json({
+                                "event": "human_validation_required",
+                                "data": {
+                                    "type": "consensus_reached",
+                                    "topic": topic,
+                                    "total_turns": current_turn,
+                                    "message": "Consenso atingido. Aguardando aprovação do humano para finalizar."
+                                }
+                            })
+                            # Aguardar resposta do humano (timeout 60s)
+                            try:
+                                import asyncio
+                                response = await asyncio.wait_for(websocket.receive_json(), timeout=60.0)
+                                if not response.get("approved", False):
+                                    # Humano rejeitou — continuar debate
+                                    consecutive_consensus = 0
+                                    last_consensus = False
+                                    logger.info(f"[HUMAN] Turno {current_turn}: consenso rejeitado pelo humano")
+                                    continue
+                            except (asyncio.TimeoutError, Exception):
+                                # Timeout ou erro — continuar debate
+                                consecutive_consensus = 0
+                                last_consensus = False
+                                logger.info(f"[HUMAN] Turno {current_turn}: timeout na validação humana")
+
                         # Gerar resumos do debate
                         summary_short = await generate_debate_summary(
                             self.agents[0].model, topic, history, True
@@ -1375,6 +1810,370 @@ async def _get_transcript(conversation_id: str) -> list:
 # Set para rastrear requests ativos (idempotencia)
 _active_requests: set = set()
 
+
+@app.post("/api/debate/{conversation_id}/pause")
+async def pause_debate(conversation_id: str):
+    """Pausa um debate ativo, salvando seu estado."""
+    state = await CortexDB.get_debate_state(conversation_id)
+    if not state:
+        return {"error": "Debate nao encontrado"}
+    if state["status"] == "completed":
+        return {"error": "Debate ja foi finalizado"}
+
+    await CortexDB.save_debate_state(
+        conversation_id, state["topic"], state["current_turn"],
+        state["history"], "paused", state.get("session_id")
+    )
+    return {"status": "paused", "conversation_id": conversation_id, "turn": state["current_turn"]}
+
+
+@app.post("/api/debate/{conversation_id}/resume")
+async def resume_debate(conversation_id: str):
+    """Retoma um debate pausado."""
+    state = await CortexDB.get_debate_state(conversation_id)
+    if not state:
+        return {"error": "Debate nao encontrado"}
+    if state["status"] != "paused":
+        return {"error": "Debate nao esta pausado"}
+
+    return {
+        "status": "resumed",
+        "conversation_id": conversation_id,
+        "topic": state["topic"],
+        "current_turn": state["current_turn"],
+        "history": state["history"],
+        "session_id": state.get("session_id")
+    }
+
+
+@app.get("/api/debate/{conversation_id}/state")
+async def get_debate_state(conversation_id: str):
+    """Retorna o estado atual de um debate."""
+    state = await CortexDB.get_debate_state(conversation_id)
+    if not state:
+        return {"error": "Debate nao encontrado"}
+    return state
+
+
+@app.get("/api/models")
+async def list_models():
+    """Lista modelos disponíveis no Ollama."""
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get("http://127.0.0.1:11434/api/tags", timeout=5.0)
+            resp.raise_for_status()
+            models = resp.json().get("models", [])
+            return {"models": [m["name"] for m in models]}
+    except Exception as e:
+        return {"models": [], "error": str(e)}
+
+
+@app.get("/api/agents/config")
+async def get_agent_config():
+    """Retorna configuração de modelos por agente."""
+    return {"agent_models": DEFAULT_AGENT_MODELS}
+
+
+# =====================================================================
+# GUARDRAILS, SCENARIOS & TEAMWORK REST API
+# =====================================================================
+
+@app.post("/api/guardrails/validate")
+async def validate_guardrail(payload: dict):
+    """Valida se um tópico ou texto obedece ao Guardrail de Escopo Técnico."""
+    text = payload.get("text", "") or payload.get("topic", "")
+    res = get_scope_guard().validate_topic(text)
+    return res.dict()
+
+
+@app.get("/api/scenarios/engineering")
+async def get_engineering_scenario():
+    """Retorna um cenário rico de engenharia com restrições de produção."""
+    engine = get_scenario_engine()
+    sc = engine.get_random_engineering_scenario()
+    return sc.dict()
+
+
+@app.get("/api/scenarios/content")
+async def get_content_scenario():
+    """Retorna um tema de artigo técnico aprofundado."""
+    engine = get_scenario_engine()
+    topic = engine.get_random_content_topic()
+    return {"topic": topic}
+
+
+@app.post("/api/teamwork/start")
+async def start_teamwork_session(req: TeamworkSessionRequest):
+    """Inicia uma sessão autônoma de TeamWork (Engenharia ou Conteúdo)."""
+    scope_res = get_scope_guard().validate_topic(req.goal)
+    if not scope_res.allowed:
+        raise HTTPException(status_code=400, detail=f"Guardrail de Escopo: {scope_res.reason}")
+
+    model = await resolve_model(req.model)
+    req.model = model
+
+    if req.mode == TeamworkMode.ENGINEERING:
+        pipeline = EngineeringPipeline(model=model, num_ctx=req.num_ctx)
+        result = await pipeline.run(req)
+    elif req.mode == TeamworkMode.CONTENT:
+        pipeline = ContentPipeline(model=model, num_ctx=req.num_ctx)
+        result = await pipeline.run(req)
+    else:
+        raise HTTPException(status_code=400, detail=f"Modo de Teamwork '{req.mode}' inválido.")
+
+    await CortexDB.save_teamwork_session(
+        session_id=result.session_id,
+        project_name=result.project_name,
+        mode=result.mode.value if hasattr(result.mode, "value") else str(result.mode),
+        goal=result.goal,
+        output_dir=result.output_directory,
+        executive_summary=result.executive_summary,
+        total_steps=result.total_steps,
+        artifacts=[a.dict() for a in result.artifacts]
+    )
+    return result.dict()
+
+
+@app.post("/api/teamwork/stream")
+async def stream_teamwork_session(req: TeamworkSessionRequest):
+    """Executa a pipeline de TeamWork e transmite os eventos em tempo real via SSE."""
+    scope_res = get_scope_guard().validate_topic(req.goal)
+    if not scope_res.allowed:
+        raise HTTPException(status_code=400, detail=f"Guardrail de Escopo: {scope_res.reason}")
+
+    model = await resolve_model(req.model)
+    req.model = model
+
+    queue = asyncio.Queue()
+
+    async def event_callback(evt_data):
+        await queue.put(evt_data)
+
+    async def run_pipeline():
+        try:
+            if req.mode == TeamworkMode.ENGINEERING:
+                pipeline = EngineeringPipeline(model=model, num_ctx=req.num_ctx)
+                res = await pipeline.run(req, progress_callback=event_callback)
+            else:
+                pipeline = ContentPipeline(model=model, num_ctx=req.num_ctx)
+                res = await pipeline.run(req, progress_callback=event_callback)
+
+            await CortexDB.save_teamwork_session(
+                session_id=res.session_id,
+                project_name=res.project_name,
+                mode=res.mode.value if hasattr(res.mode, "value") else str(res.mode),
+                goal=res.goal,
+                output_dir=res.output_directory,
+                executive_summary=res.executive_summary,
+                total_steps=res.total_steps,
+                artifacts=[a.dict() for a in res.artifacts]
+            )
+
+            await queue.put({"type": "teamwork_complete", "status": "completed", "result": res.dict()})
+        except Exception as e:
+            await queue.put({"type": "error", "status": "error", "message": str(e)})
+        finally:
+            await queue.put(None)
+
+    asyncio.create_task(run_pipeline())
+
+    async def sse_gen():
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(sse_gen(), media_type="text/event-stream")
+
+
+@app.get("/api/teamwork/projects")
+async def list_teamwork_projects():
+    """Retorna a lista unificada de projetos com metadados do CortexDB e disco."""
+    db_projects = await CortexDB.get_recent_teamwork_sessions(50)
+    disk_projects = WorkspaceManager.get_all_projects_summary()
+
+    # Combinar projetos do banco com diretórios do disco
+    seen_ids = set()
+    unified = []
+    for p in db_projects:
+        seen_ids.add(p["project_name"])
+        seen_ids.add(p["session_id"])
+        unified.append(p)
+
+    for dp in disk_projects:
+        if dp["project_id"] not in seen_ids:
+            unified.append({
+                "session_id": dp["project_id"],
+                "project_name": dp["project_id"],
+                "mode": "engineering" if "project_eng" in dp["project_id"] else "content",
+                "goal": dp["project_id"].replace("_", " "),
+                "status": "completed",
+                "output_dir": dp["path"],
+                "executive_summary": f"Projeto em disco com {dp['total_files']} arquivo(s).",
+                "total_steps": dp["total_files"],
+                "created_at": dp["created_at"],
+                "files": dp["files"],
+                "total_files": dp["total_files"]
+            })
+
+    return {"projects": unified, "total": len(unified)}
+
+
+@app.get("/api/teamwork/file")
+async def read_project_file(project_id: str, file_path: str):
+    """Lê o conteúdo de um arquivo de projeto de forma segura dentro do Sandbox."""
+    try:
+        from guardrails.sandbox import PathValidator
+        target = PathValidator.validate_safe_write_path(file_path, project_id)
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+        content = target.read_text(encoding="utf-8")
+        return {"project_id": project_id, "file_path": file_path, "content": content}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/teamwork/workspace/{project_id}")
+async def get_workspace_files(project_id: str):
+    """Lista todos os arquivos gerados de um projeto no disco."""
+    files = WorkspaceManager.get_project_tree(project_id)
+    return {"project_id": project_id, "files": files, "total_files": len(files)}
+
+
+# =====================================================================
+# OPENAI-COMPATIBLE API LAYER (/v1)
+# =====================================================================
+
+@app.get("/v1/models")
+async def openai_list_models():
+    """Retorna a lista de modelos suportados no formato OpenAI."""
+    models_list = [
+        {"id": "thz-teamwork:engineering", "object": "model", "created": 1700000000, "owned_by": "thz-minds"},
+        {"id": "thz-teamwork:content", "object": "model", "created": 1700000000, "owned_by": "thz-minds"},
+        {"id": "thz-council:debate", "object": "model", "created": 1700000000, "owned_by": "thz-minds"},
+        {"id": "thz-lang:copilot", "object": "model", "created": 1700000000, "owned_by": "thz-minds"},
+    ]
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5.0)
+            if resp.status_code == 200:
+                for m in resp.json().get("models", []):
+                    models_list.append({
+                        "id": m["name"],
+                        "object": "model",
+                        "created": int(datetime.now().timestamp()),
+                        "owned_by": "ollama"
+                    })
+    except Exception:
+        pass
+    return {"object": "list", "data": models_list}
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(req: Request):
+    """Endpoint compatível com OpenAI para integração com Thz-Lang, VS Code, Cursor e IDEs."""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    model = body.get("model", "thz-teamwork:engineering")
+    messages = body.get("messages", [])
+    stream = body.get("stream", False)
+
+    if not messages:
+        raise HTTPException(status_code=400, detail="Campo 'messages' é obrigatório")
+
+    user_prompt = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            user_prompt = m.get("content", "")
+            break
+    if not user_prompt:
+        user_prompt = messages[-1].get("content", "")
+
+    guard = get_scope_guard()
+    scope_val = guard.validate_topic(user_prompt)
+    if not scope_val.allowed:
+        raise HTTPException(status_code=400, detail=f"Guardrail de Escopo: {scope_val.reason}")
+
+    if "engineering" in model or "thz-lang" in model:
+        pipeline = EngineeringPipeline()
+        team_req = TeamworkSessionRequest(goal=user_prompt, mode=TeamworkMode.ENGINEERING)
+
+        if stream:
+            async def sse_gen():
+                created = int(datetime.now().timestamp())
+                cmpl_id = "chatcmpl-" + uuid.uuid4().hex
+                yield f"data: {json.dumps({'id': cmpl_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'delta': {'role': 'assistant', 'content': '🚀 Iniciando pipeline de engenharia THZ Minds...\n\n'}, 'index': 0, 'finish_reason': None}]})}\n\n"
+
+                res = await pipeline.run(team_req)
+
+                final_content = (
+                    f"### 📦 Projeto Gerado: {res.project_name}\n\n"
+                    f"{res.executive_summary}\n\n"
+                    f"**Arquivos Gravados em:** `{res.output_directory}`\n\n"
+                    f"**Arquivos Gerados:**\n" + "\n".join(f"- `{a.path}` ({a.author_role})" for a in res.artifacts)
+                )
+                yield f"data: {json.dumps({'id': cmpl_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'delta': {'content': final_content}, 'index': 0, 'finish_reason': 'stop'}]})}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(sse_gen(), media_type="text/event-stream")
+        else:
+            res = await pipeline.run(team_req)
+            content_resp = (
+                f"### 🚀 Solução de Engenharia: {res.project_name}\n\n"
+                f"{res.executive_summary}\n\n"
+                f"**Arquivos Gravados em:** `{res.output_directory}`\n\n"
+                f"**Arquivos Gerados ({len(res.artifacts)}):**\n" + "\n".join(f"- `{a.path}` ({a.author_role})" for a in res.artifacts)
+            )
+            return {
+                "id": "chatcmpl-" + uuid.uuid4().hex,
+                "object": "chat.completion",
+                "created": int(datetime.now().timestamp()),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content_resp},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": len(user_prompt)//4, "completion_tokens": len(content_resp)//4, "total_tokens": (len(user_prompt)+len(content_resp))//4}
+            }
+
+    elif "content" in model:
+        pipeline = ContentPipeline()
+        team_req = TeamworkSessionRequest(goal=user_prompt, mode=TeamworkMode.CONTENT)
+        res = await pipeline.run(team_req)
+        content_resp = (
+            f"### ✍️ Artigo Técnico Concluído: {res.project_name}\n\n"
+            f"{res.executive_summary}\n\n"
+            f"**Salvo em:** `{res.output_directory}`\n\n"
+            f"**Arquivos Gerados ({len(res.artifacts)}):**\n" + "\n".join(f"- `{a.path}` ({a.author_role})" for a in res.artifacts)
+        )
+        return {
+            "id": "chatcmpl-" + uuid.uuid4().hex,
+            "object": "chat.completion",
+            "created": int(datetime.now().timestamp()),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content_resp},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": len(user_prompt)//4, "completion_tokens": len(content_resp)//4, "total_tokens": (len(user_prompt)+len(content_resp))//4}
+        }
+
+    else:
+        resolved = await resolve_model(model)
+        payload = {"model": resolved, "messages": messages, "stream": stream}
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=120.0)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+
 @app.websocket("/ws/debate")
 async def debate_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -1396,6 +2195,15 @@ async def debate_websocket(websocket: WebSocket):
 
         if mode == "single":
             req = SingleDebateRequest(**raw_payload)
+            # Validação pelo Guardrail de Escopo Técnico
+            scope_val = get_scope_guard().validate_topic(req.topic)
+            if not scope_val.allowed:
+                await websocket.send_json({
+                    "event": "error",
+                    "data": {"message": f"Bloqueado pelo Guardrail: {scope_val.reason}"}
+                })
+                return
+
             model = await resolve_model(req.model)
             agents = create_agents(model)
             engine = MultiAgentEngine(agents=agents, num_ctx=req.num_ctx, max_turns=req.max_turns)
@@ -1465,12 +2273,12 @@ async def debate_websocket(websocket: WebSocket):
                 await SessionFiles.save_debate(session_dir, debate_count, topic, transcript, summary_short, summary_full)
 
                 if datetime.now() + timedelta(minutes=10) < end_time and not shutdown_manager.should_exit:
-                    logger.info(f"[PAUSA] 1 minuto antes do proximo debate...")
+                    logger.info(f"[PAUSA] 30 segundos antes do proximo debate...")
                     await websocket.send_json({
                         "event": "debate_paused",
-                        "data": {"duration_seconds": 60, "next_debate": debate_count + 1}
+                        "data": {"duration_seconds": 30, "next_debate": debate_count + 1}
                     })
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(30)
 
             # Limpa shutdown manager
             shutdown_manager.current_session = None

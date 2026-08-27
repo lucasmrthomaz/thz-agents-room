@@ -15,7 +15,7 @@ pytestmark = pytest.mark.asyncio
 class TestSessionFiles:
     """Testes para gerenciamento de arquivos de sessao."""
 
-    def test_get_session_dir(self, tmp_path):
+    async def test_get_session_dir(self, tmp_path):
         """Testa criacao do diretorio de sessao."""
         from server import SessionFiles
 

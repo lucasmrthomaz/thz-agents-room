@@ -55,9 +55,9 @@ class THZMainsApp:
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("THZ Minds — Motor Multiagente Local")
-        self.root.geometry("1000x750")
-        self.root.minsize(800, 550)
+        self.root.title("THZ Minds — Motor Multiagente Local & TeamWork")
+        self.root.geometry("1260x860")
+        self.root.minsize(920, 620)
         self.root.configure(bg=BG_DARK)
 
         self.server_running = False
@@ -69,6 +69,8 @@ class THZMainsApp:
         self.current_mode = None
         self.loading_frame = 0
         self.loading_active = False
+        self.step_start_time = 0.0
+        self.active_file_info = None
         self.current_turn = 0
         self.max_turns = 48
 
@@ -90,7 +92,12 @@ class THZMainsApp:
         self.style.configure("Header.TLabel", font=("Segoe UI", 18, "bold"), foreground=ACCENT_CYAN)
         self.style.configure("Sub.TLabel", font=("Segoe UI", 9), foreground=FG_DIM)
         self.style.configure("Status.TLabel", font=("Consolas", 9), foreground=FG_DIM)
-        self.style.configure("Loading.TLabel", font=("Consolas", 12), foreground=ACCENT_CYAN)
+        self.style.configure("Loading.TLabel", font=("Consolas", 11, "bold"), foreground=ACCENT_YELLOW)
+
+        # Abas Notebook
+        self.style.configure("TNotebook", background=BG_DARK, borderwidth=0)
+        self.style.configure("TNotebook.Tab", background=BG_MID, foreground=FG_PRIMARY, font=("Segoe UI", 9, "bold"), padding=[10, 5])
+        self.style.map("TNotebook.Tab", background=[("selected", BG_LIGHT)], foreground=[("selected", ACCENT_CYAN)])
 
     def _build_ui(self):
         """Constrói a interface."""
@@ -110,97 +117,125 @@ class THZMainsApp:
         # Separador
         ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X, padx=15, pady=5)
 
-        # Controles
-        controls = ttk.Frame(self.root)
-        controls.pack(fill=tk.X, padx=15, pady=5)
+        # Controles - Linha 1: Modo, Parâmetros e Ações Principais
+        controls_row1 = ttk.Frame(self.root)
+        controls_row1.pack(fill=tk.X, padx=15, pady=(5, 4))
 
         # Modo
-        mode_frame = ttk.Frame(controls)
+        mode_frame = ttk.Frame(controls_row1)
         mode_frame.pack(side=tk.LEFT, padx=(0, 15))
 
-        ttk.Label(mode_frame, text="Modo:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(mode_frame, text="Modo:").pack(side=tk.LEFT, padx=(0, 4))
 
         self.mode_var = tk.StringVar(value="single")
         self.btn_single = tk.Radiobutton(
-            mode_frame, text="Single", variable=self.mode_var, value="single",
+            mode_frame, text="💬 Debate", variable=self.mode_var, value="single",
             bg=BG_DARK, fg=ACCENT_BLUE, selectcolor=BG_MID, activebackground=BG_DARK,
-            activeforeground=ACCENT_BLUE, font=("Segoe UI", 10), command=self._on_mode_change
+            activeforeground=ACCENT_BLUE, font=("Segoe UI", 9, "bold"), command=self._on_mode_change
         )
-        self.btn_single.pack(side=tk.LEFT, padx=(0, 10))
+        self.btn_single.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_eng = tk.Radiobutton(
+            mode_frame, text="⚙️ Engenharia", variable=self.mode_var, value="engineering",
+            bg=BG_DARK, fg=ACCENT_GREEN, selectcolor=BG_MID, activebackground=BG_DARK,
+            activeforeground=ACCENT_GREEN, font=("Segoe UI", 9, "bold"), command=self._on_mode_change
+        )
+        self.btn_eng.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_content = tk.Radiobutton(
+            mode_frame, text="✍️ Artigo", variable=self.mode_var, value="content",
+            bg=BG_DARK, fg=ACCENT_MAGENTA, selectcolor=BG_MID, activebackground=BG_DARK,
+            activeforeground=ACCENT_MAGENTA, font=("Segoe UI", 9, "bold"), command=self._on_mode_change
+        )
+        self.btn_content.pack(side=tk.LEFT, padx=(0, 4))
 
         self.btn_autonomous = tk.Radiobutton(
-            mode_frame, text="Autonomous", variable=self.mode_var, value="autonomous",
+            mode_frame, text="🌙 Noturno", variable=self.mode_var, value="autonomous",
             bg=BG_DARK, fg=ACCENT_YELLOW, selectcolor=BG_MID, activebackground=BG_DARK,
-            activeforeground=ACCENT_YELLOW, font=("Segoe UI", 10), command=self._on_mode_change
+            activeforeground=ACCENT_YELLOW, font=("Segoe UI", 9, "bold"), command=self._on_mode_change
         )
         self.btn_autonomous.pack(side=tk.LEFT)
 
-        # Topico
-        topic_frame = ttk.Frame(controls)
-        topic_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # Parâmetros (Modelo, Turnos, Horas)
+        params_frame = ttk.Frame(controls_row1)
+        params_frame.pack(side=tk.LEFT, padx=(0, 15))
 
-        ttk.Label(topic_frame, text="Topico:").pack(side=tk.LEFT, padx=(0, 5))
-
-        self.topic_entry = tk.Entry(
-            topic_frame, font=("Segoe UI", 11), bg=BG_MID, fg=FG_PRIMARY,
-            insertbackground=FG_PRIMARY, relief=tk.FLAT, highlightthickness=1,
-            highlightbackground=FG_DIM, highlightcolor=ACCENT_BLUE
+        ttk.Label(params_frame, text="Modelo:").pack(side=tk.LEFT, padx=(0, 2))
+        self.model_var = tk.StringVar(value="auto")
+        self.model_entry = tk.Entry(
+            params_frame, textvariable=self.model_var, width=14,
+            font=("Consolas", 9), bg=BG_MID, fg=FG_PRIMARY, relief=tk.FLAT,
+            highlightthickness=1, highlightbackground=FG_DIM
         )
-        self.topic_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
-        self.topic_entry.bind("<Return>", lambda e: self._start_debate())
+        self.model_entry.pack(side=tk.LEFT, padx=(0, 8))
 
-        # Botoes
-        btn_frame = ttk.Frame(controls)
+        ttk.Label(params_frame, text="Turnos:").pack(side=tk.LEFT, padx=(0, 2))
+        self.turns_var = tk.StringVar(value="48")
+        self.turns_entry = tk.Entry(
+            params_frame, textvariable=self.turns_var, width=4,
+            font=("Consolas", 9), bg=BG_MID, fg=FG_PRIMARY, relief=tk.FLAT,
+            highlightthickness=1, highlightbackground=FG_DIM
+        )
+        self.turns_entry.pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Label(params_frame, text="Duração (h):").pack(side=tk.LEFT, padx=(0, 2))
+        self.hours_var = tk.StringVar(value="8")
+        self.hours_entry = tk.Entry(
+            params_frame, textvariable=self.hours_var, width=4,
+            font=("Consolas", 9), bg=BG_MID, fg=FG_PRIMARY, relief=tk.FLAT,
+            highlightthickness=1, highlightbackground=FG_DIM
+        )
+        self.hours_entry.pack(side=tk.LEFT)
+        self.hours_entry.config(state=tk.DISABLED)
+
+        # Botões de Ação
+        btn_frame = ttk.Frame(controls_row1)
         btn_frame.pack(side=tk.RIGHT)
 
         self.start_btn = tk.Button(
             btn_frame, text="▶ Iniciar", font=("Segoe UI", 10, "bold"),
-            bg=ACCENT_GREEN, fg=BG_DARK, relief=tk.FLAT, padx=15, pady=5,
-            command=self._start_debate, state=tk.NORMAL
+            bg=ACCENT_GREEN, fg=BG_DARK, relief=tk.FLAT, padx=14, pady=4,
+            command=self._start_debate, state=tk.NORMAL, cursor="hand2"
         )
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.start_btn.pack(side=tk.LEFT, padx=(0, 6))
 
         self.stop_btn = tk.Button(
             btn_frame, text="■ Parar", font=("Segoe UI", 10, "bold"),
-            bg=ACCENT_RED, fg=BG_DARK, relief=tk.FLAT, padx=15, pady=5,
-            command=self._stop_debate, state=tk.DISABLED
+            bg=ACCENT_RED, fg=BG_DARK, relief=tk.FLAT, padx=14, pady=4,
+            command=self._stop_debate, state=tk.DISABLED, cursor="hand2"
         )
-        self.stop_btn.pack(side=tk.LEFT)
+        self.stop_btn.pack(side=tk.LEFT, padx=(0, 6))
 
-        # Configuracoes (linha)
-        config_frame = ttk.Frame(self.root)
-        config_frame.pack(fill=tk.X, padx=15, pady=(0, 5))
-
-        ttk.Label(config_frame, text="Turnos:").pack(side=tk.LEFT, padx=(0, 3))
-        self.turns_var = tk.StringVar(value="48")
-        self.turns_entry = tk.Entry(
-            config_frame, textvariable=self.turns_var, width=5,
-            font=("Consolas", 10), bg=BG_MID, fg=FG_PRIMARY, relief=tk.FLAT,
-            highlightthickness=1, highlightbackground=FG_DIM
+        self.output_btn = tk.Button(
+            btn_frame, text="📂 Pasta output/", font=("Segoe UI", 9, "bold"),
+            bg=BG_LIGHT, fg=FG_PRIMARY, relief=tk.FLAT, padx=10, pady=4,
+            command=self._open_output_folder, cursor="hand2"
         )
-        self.turns_entry.pack(side=tk.LEFT, padx=(0, 15))
+        self.output_btn.pack(side=tk.LEFT)
 
-        ttk.Label(config_frame, text="Modelo:").pack(side=tk.LEFT, padx=(0, 3))
-        self.model_var = tk.StringVar(value="auto")
-        self.model_entry = tk.Entry(
-            config_frame, textvariable=self.model_var, width=20,
-            font=("Consolas", 10), bg=BG_MID, fg=FG_PRIMARY, relief=tk.FLAT,
-            highlightthickness=1, highlightbackground=FG_DIM
+        # Controles - Linha 2: Campo de Tópico / Desafio em Largura Total
+        controls_row2 = ttk.Frame(self.root)
+        controls_row2.pack(fill=tk.X, padx=15, pady=(0, 5))
+
+        ttk.Label(controls_row2, text="Tópico / Desafio:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.topic_entry = tk.Entry(
+            controls_row2, font=("Segoe UI", 11), bg=BG_MID, fg=FG_PRIMARY,
+            insertbackground=FG_PRIMARY, relief=tk.FLAT, highlightthickness=1,
+            highlightbackground=FG_DIM, highlightcolor=ACCENT_BLUE
         )
-        self.model_entry.pack(side=tk.LEFT, padx=(0, 15))
+        self.topic_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.topic_entry.bind("<Return>", lambda e: self._start_debate())
 
-        ttk.Label(config_frame, text="Duracao (h):").pack(side=tk.LEFT, padx=(0, 3))
-        self.hours_var = tk.StringVar(value="8")
-        self.hours_entry = tk.Entry(
-            config_frame, textvariable=self.hours_var, width=5,
-            font=("Consolas", 10), bg=BG_MID, fg=FG_PRIMARY, relief=tk.FLAT,
-            highlightthickness=1, highlightbackground=FG_DIM
+        self.scenario_btn = tk.Button(
+            controls_row2, text="🎲 Gerar Cenário Real", font=("Segoe UI", 9, "bold"),
+            bg=BG_LIGHT, fg=ACCENT_CYAN, relief=tk.FLAT, padx=12, pady=4,
+            command=self._fill_random_scenario, cursor="hand2"
         )
-        self.hours_entry.pack(side=tk.LEFT, padx=(0, 15))
-        self.hours_entry.config(state=tk.DISABLED)
+        self.scenario_btn.pack(side=tk.RIGHT)
 
-        # Separator
-        ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X, padx=15, pady=5)
+        # Separador
+        ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X, padx=15, pady=4)
 
         # Loading indicator
         self.loading_frame_label = tk.Label(
@@ -216,83 +251,128 @@ class THZMainsApp:
         )
         main_pane.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 5))
 
-        # === SIDEBAR ===
-        sidebar_frame = tk.Frame(main_pane, bg=BG_DARK, width=250)
-        main_pane.add(sidebar_frame, minsize=200, width=250)
+        # === SIDEBAR COM ABAS ===
+        sidebar_frame = tk.Frame(main_pane, bg=BG_DARK, width=280)
+        main_pane.add(sidebar_frame, minsize=240, width=280)
 
-        # Header da sidebar
-        sidebar_header = tk.Frame(sidebar_frame, bg=BG_DARK)
-        sidebar_header.pack(fill=tk.X, padx=5, pady=(5, 10))
+        self.sidebar_notebook = ttk.Notebook(sidebar_frame)
+        self.sidebar_notebook.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        tk.Label(
-            sidebar_header, text="📋 Debates Recentes", fg=ACCENT_CYAN, bg=BG_DARK,
-            font=("Segoe UI", 11, "bold")
-        ).pack(side=tk.LEFT)
+        # --- ABA 1: DEBATES ---
+        tab_debates = tk.Frame(self.sidebar_notebook, bg=BG_DARK)
+        self.sidebar_notebook.add(tab_debates, text=" 💬 Debates ")
 
+        debates_header = tk.Frame(tab_debates, bg=BG_DARK)
+        debates_header.pack(fill=tk.X, padx=5, pady=(5, 5))
+        tk.Label(debates_header, text="Histórico de Debates", fg=ACCENT_CYAN, bg=BG_DARK, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
         self.refresh_btn = tk.Button(
-            sidebar_header, text="↻", fg=ACCENT_CYAN, bg=BG_DARK,
-            font=("Segoe UI", 12, "bold"), relief=tk.FLAT, bd=0,
+            debates_header, text="↻ Atualizar", fg=ACCENT_CYAN, bg=BG_MID,
+            font=("Segoe UI", 9, "bold"), relief=tk.FLAT, bd=0, padx=6, pady=2,
             command=self._load_debate_history, cursor="hand2"
         )
         self.refresh_btn.pack(side=tk.RIGHT)
 
-        # Lista de debates (scrollavel)
-        sidebar_list_frame = tk.Frame(sidebar_frame, bg=BG_MID, relief=tk.FLAT)
-        sidebar_list_frame.pack(fill=tk.BOTH, expand=True, padx=2)
+        sidebar_list_frame = tk.Frame(tab_debates, bg=BG_MID, relief=tk.FLAT)
+        sidebar_list_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
 
-        self.sidebar_canvas = tk.Canvas(
-            sidebar_list_frame, bg=BG_MID, highlightthickness=0, bd=0
-        )
-        self.sidebar_scrollbar = tk.Scrollbar(
-            sidebar_list_frame, orient=tk.VERTICAL, command=self.sidebar_canvas.yview
-        )
+        self.sidebar_canvas = tk.Canvas(sidebar_list_frame, bg=BG_MID, highlightthickness=0, bd=0)
+        self.sidebar_scrollbar = tk.Scrollbar(sidebar_list_frame, orient=tk.VERTICAL, command=self.sidebar_canvas.yview)
         self.sidebar_inner = tk.Frame(self.sidebar_canvas, bg=BG_MID)
-
         self.sidebar_inner.bind("<Configure>", lambda e: self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all")))
         self.sidebar_canvas.create_window((0, 0), window=self.sidebar_inner, anchor=tk.NW)
         self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
-
         self.sidebar_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.sidebar_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # Bind mousewheel
         self.sidebar_canvas.bind("<MouseWheel>", lambda e: self.sidebar_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
 
-        # Armazena referencias dos widgets de debate
         self.debate_entries = []
         self.debate_ids = []
 
-        # === BASE DE CONHECIMENTO (sidebar) ===
-        knowledge_header = tk.Frame(sidebar_frame, bg=BG_DARK)
-        knowledge_header.pack(fill=tk.X, padx=5, pady=(10, 5))
+        # --- ABA 2: PROJETOS GERADOS (OUTPUT) ---
+        tab_projects = tk.Frame(self.sidebar_notebook, bg=BG_DARK)
+        self.sidebar_notebook.add(tab_projects, text=" 📦 Projetos ")
 
-        tk.Label(
-            knowledge_header, text="🧠 Base de Conhecimento", fg=ACCENT_MAGENTA, bg=BG_DARK,
-            font=("Segoe UI", 11, "bold")
-        ).pack(side=tk.LEFT)
-
-        self.knowledge_list_frame = tk.Frame(sidebar_frame, bg=BG_DARK)
-        self.knowledge_list_frame.pack(fill=tk.X, padx=2)
-
-        self.knowledge_canvas = tk.Canvas(
-            self.knowledge_list_frame, bg=BG_MID, highlightthickness=0, bd=0, height=120
+        projects_header = tk.Frame(tab_projects, bg=BG_DARK)
+        projects_header.pack(fill=tk.X, padx=5, pady=(5, 5))
+        tk.Label(projects_header, text="Fábrica (output/)", fg=ACCENT_GREEN, bg=BG_DARK, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        self.refresh_projects_btn = tk.Button(
+            projects_header, text="↻ Atualizar", fg=ACCENT_GREEN, bg=BG_MID,
+            font=("Segoe UI", 9, "bold"), relief=tk.FLAT, bd=0, padx=6, pady=2,
+            command=self._load_projects_history, cursor="hand2"
         )
-        self.knowledge_scrollbar = Scrollbar(
-            self.knowledge_list_frame, orient=tk.VERTICAL, command=self.knowledge_canvas.yview
+        self.refresh_projects_btn.pack(side=tk.RIGHT)
+
+        projects_list_frame = tk.Frame(tab_projects, bg=BG_MID, relief=tk.FLAT)
+        projects_list_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
+
+        self.projects_canvas = tk.Canvas(projects_list_frame, bg=BG_MID, highlightthickness=0, bd=0)
+        self.projects_scrollbar = tk.Scrollbar(projects_list_frame, orient=tk.VERTICAL, command=self.projects_canvas.yview)
+        self.projects_inner = tk.Frame(self.projects_canvas, bg=BG_MID)
+        self.projects_inner.bind("<Configure>", lambda e: self.projects_canvas.configure(scrollregion=self.projects_canvas.bbox("all")))
+        self.projects_canvas.create_window((0, 0), window=self.projects_inner, anchor=tk.NW)
+        self.projects_canvas.configure(yscrollcommand=self.projects_scrollbar.set)
+        self.projects_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.projects_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.projects_canvas.bind("<MouseWheel>", lambda e: self.projects_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+
+        self.project_entries = []
+
+        # --- ABA 3: CONHECIMENTO ---
+        tab_knowledge = tk.Frame(self.sidebar_notebook, bg=BG_DARK)
+        self.sidebar_notebook.add(tab_knowledge, text=" 🧠 Conhecimento ")
+
+        knowledge_header = tk.Frame(tab_knowledge, bg=BG_DARK)
+        knowledge_header.pack(fill=tk.X, padx=5, pady=(5, 5))
+        tk.Label(knowledge_header, text="Tópicos & Skills", fg=ACCENT_MAGENTA, bg=BG_DARK, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        self.refresh_knowledge_btn = tk.Button(
+            knowledge_header, text="↻ Atualizar", fg=ACCENT_MAGENTA, bg=BG_MID,
+            font=("Segoe UI", 9, "bold"), relief=tk.FLAT, bd=0, padx=6, pady=2,
+            command=self._load_knowledge_base, cursor="hand2"
         )
+        self.refresh_knowledge_btn.pack(side=tk.RIGHT)
+
+        knowledge_list_frame = tk.Frame(tab_knowledge, bg=BG_MID, relief=tk.FLAT)
+        knowledge_list_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
+
+        self.knowledge_canvas = tk.Canvas(knowledge_list_frame, bg=BG_MID, highlightthickness=0, bd=0)
+        self.knowledge_scrollbar = Scrollbar(knowledge_list_frame, orient=tk.VERTICAL, command=self.knowledge_canvas.yview)
         self.knowledge_inner = tk.Frame(self.knowledge_canvas, bg=BG_MID)
-
         self.knowledge_inner.bind("<Configure>", lambda e: self.knowledge_canvas.configure(scrollregion=self.knowledge_canvas.bbox("all")))
         self.knowledge_canvas.create_window((0, 0), window=self.knowledge_inner, anchor=tk.NW)
         self.knowledge_canvas.configure(yscrollcommand=self.knowledge_scrollbar.set)
-
         self.knowledge_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.knowledge_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.knowledge_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.knowledge_canvas.bind("<MouseWheel>", lambda e: self.knowledge_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
 
-        # === AREA DE DEBATE ===
+        # === AREA DE DEBATE / VISUALIZADOR ===
         debate_frame = tk.Frame(main_pane, bg=BG_MID)
         main_pane.add(debate_frame, minsize=400)
+
+        # Toolbar do visualizador de arquivos (oculta por padrão)
+        self.viewer_toolbar = tk.Frame(debate_frame, bg=BG_LIGHT)
+        self.viewer_title_label = tk.Label(self.viewer_toolbar, text="", fg=ACCENT_CYAN, bg=BG_LIGHT, font=("Segoe UI", 10, "bold"))
+        self.viewer_title_label.pack(side=tk.LEFT, padx=10, pady=5)
+
+        self.btn_close_viewer = tk.Button(
+            self.viewer_toolbar, text="✕ Fechar", font=("Segoe UI", 8, "bold"),
+            bg=ACCENT_RED, fg=BG_DARK, relief=tk.FLAT, padx=8, pady=2,
+            command=self._close_file_viewer, cursor="hand2"
+        )
+        self.btn_close_viewer.pack(side=tk.RIGHT, padx=5, pady=4)
+
+        self.btn_open_file_dir = tk.Button(
+            self.viewer_toolbar, text="📂 Abrir no Explorer", font=("Segoe UI", 8, "bold"),
+            bg=BG_MID, fg=FG_PRIMARY, relief=tk.FLAT, padx=8, pady=2,
+            command=self._open_file_folder, cursor="hand2"
+        )
+        self.btn_open_file_dir.pack(side=tk.RIGHT, padx=5, pady=4)
+
+        self.btn_copy_file = tk.Button(
+            self.viewer_toolbar, text="📋 Copiar Código", font=("Segoe UI", 8, "bold"),
+            bg=ACCENT_BLUE, fg=BG_DARK, relief=tk.FLAT, padx=8, pady=2,
+            command=self._copy_file_content, cursor="hand2"
+        )
+        self.btn_copy_file.pack(side=tk.RIGHT, padx=5, pady=4)
 
         self.debate_text = scrolledtext.ScrolledText(
             debate_frame, wrap=tk.WORD, font=("Consolas", 10),
@@ -339,9 +419,48 @@ class THZMainsApp:
         if mode == "autonomous":
             self.hours_entry.config(state=tk.NORMAL)
             self.topic_entry.config(state=tk.DISABLED)
+            self.scenario_btn.config(state=tk.DISABLED)
+        elif mode in ("engineering", "content"):
+            self.hours_entry.config(state=tk.DISABLED)
+            self.topic_entry.config(state=tk.NORMAL)
+            self.scenario_btn.config(state=tk.NORMAL)
         else:
             self.hours_entry.config(state=tk.DISABLED)
             self.topic_entry.config(state=tk.NORMAL)
+            self.scenario_btn.config(state=tk.NORMAL)
+
+    def _fill_random_scenario(self):
+        """Preenche o campo de tópico com um cenário rico de engenharia ou pauta de artigo."""
+        mode = self.mode_var.get()
+        try:
+            from scenarios import get_scenario_engine
+            engine = get_scenario_engine()
+            if mode == "content":
+                topic = engine.get_random_content_topic()
+            else:
+                sc = engine.get_random_engineering_scenario()
+                topic = sc.prompt
+
+            self.topic_entry.delete(0, tk.END)
+            self.topic_entry.insert(0, topic)
+            self._set_status("Cenário de produção carregado!", ACCENT_GREEN)
+        except Exception as e:
+            self._set_status(f"Erro ao carregar cenário: {e}", ACCENT_RED)
+
+    def _open_output_folder(self):
+        """Abre o diretório output/ no explorador de arquivos."""
+        import os
+        from pathlib import Path
+        output_dir = (Path(__file__).resolve().parent / "output").resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            if os.name == "nt":
+                os.startfile(str(output_dir))
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(output_dir)])
+        except Exception as e:
+            messagebox.showinfo("Output", f"Arquivos salvos em:\n{output_dir}")
 
     def _load_debate_history(self):
         """Carrega historico de debates do banco em background."""
@@ -359,6 +478,135 @@ class THZMainsApp:
                 loop.close()
 
         threading.Thread(target=load, daemon=True).start()
+
+    def _load_projects_history(self):
+        """Carrega a lista de projetos e arquivos gerados em background."""
+        def load():
+            import urllib.request
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:8000/api/teamwork/projects", timeout=5) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    projects = data.get("projects", [])
+                    self.root.after(0, self._render_projects_history, projects)
+            except Exception:
+                pass
+        threading.Thread(target=load, daemon=True).start()
+
+    def _render_projects_history(self, projects):
+        """Renderiza os projetos e seus arquivos na aba Projetos da sidebar."""
+        for widget in self.projects_inner.winfo_children():
+            widget.destroy()
+        self.project_entries.clear()
+
+        if not projects:
+            tk.Label(
+                self.projects_inner, text="Nenhum projeto gerado ainda.\nInicie o TeamWork para criar código e artigos!",
+                fg=FG_DIM, bg=BG_MID, font=("Segoe UI", 9), wraplength=220, justify=tk.CENTER
+            ).pack(padx=10, pady=25)
+            return
+
+        for p in projects:
+            p_name = p.get("project_name", p.get("session_id", "Projeto"))
+            mode = p.get("mode", "engineering")
+            goal = p.get("goal", p_name)
+            files = p.get("files", [])
+            date_str = p.get("created_at", "")[:16].replace("T", " ")
+            icon = "⚙️" if mode == "engineering" else "✍️"
+
+            card = tk.Frame(self.projects_inner, bg=BG_MID, relief=tk.FLAT)
+            card.pack(fill=tk.X, padx=2, pady=3)
+
+            header_lbl = tk.Label(
+                card, text=f"{icon} {p_name}", fg=ACCENT_GREEN if mode == "engineering" else ACCENT_MAGENTA,
+                bg=BG_MID, font=("Segoe UI", 9, "bold"), anchor=tk.W, wraplength=220, justify=tk.LEFT
+            )
+            header_lbl.pack(fill=tk.X, padx=6, pady=(4, 0))
+
+            goal_lbl = tk.Label(
+                card, text=goal[:45] + ("..." if len(goal) > 45 else ""),
+                fg=FG_PRIMARY, bg=BG_MID, font=("Segoe UI", 8), anchor=tk.W, wraplength=220, justify=tk.LEFT
+            )
+            goal_lbl.pack(fill=tk.X, padx=6, pady=(0, 2))
+
+            meta_lbl = tk.Label(
+                card, text=f"  {date_str} | {len(files)} arquivo(s)", fg=FG_DIM, bg=BG_MID,
+                font=("Segoe UI", 8), anchor=tk.W
+            )
+            meta_lbl.pack(fill=tk.X, padx=6, pady=(0, 4))
+
+            # Lista de arquivos clicáveis
+            files_frame = tk.Frame(card, bg=BG_DARK)
+            files_frame.pack(fill=tk.X, padx=4, pady=(0, 4))
+
+            for f in files:
+                f_path = f.get("path") if isinstance(f, dict) else str(f)
+                f_btn = tk.Label(
+                    files_frame, text=f"  📄 {f_path}", fg=ACCENT_CYAN, bg=BG_DARK,
+                    font=("Consolas", 8), anchor=tk.W, cursor="hand2"
+                )
+                f_btn.pack(fill=tk.X, padx=4, pady=1)
+
+                def make_click_handler(proj=p_name, fpath=f_path):
+                    return lambda e: self._show_file_content(proj, fpath)
+
+                f_btn.bind("<Button-1>", make_click_handler(p_name, f_path))
+                f_btn.bind("<Enter>", lambda e, b=f_btn: b.configure(fg=ACCENT_YELLOW))
+                f_btn.bind("<Leave>", lambda e, b=f_btn: b.configure(fg=ACCENT_CYAN))
+
+            sep = tk.Frame(self.projects_inner, bg=BG_LIGHT, height=1)
+            sep.pack(fill=tk.X, padx=6, pady=2)
+
+    def _show_file_content(self, project_id: str, file_path: str):
+        """Carrega e exibe o conteúdo de um arquivo de projeto gerado no painel central."""
+        def load():
+            import urllib.request
+            import urllib.parse
+            url = f"http://127.0.0.1:8000/api/teamwork/file?project_id={urllib.parse.quote(project_id)}&file_path={urllib.parse.quote(file_path)}"
+            try:
+                with urllib.request.urlopen(url, timeout=5) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    content = data.get("content", "")
+
+                    def render():
+                        self.viewer_toolbar.pack(fill=tk.X, padx=2, pady=(2, 4), before=self.debate_text)
+                        self.viewer_title_label.config(text=f"📄 {project_id} / {file_path}")
+                        self.active_file_info = (project_id, file_path, content)
+
+                        self.debate_text.config(state=tk.NORMAL)
+                        self.debate_text.delete("1.0", tk.END)
+                        self.debate_text.insert(tk.END, f"=== ARQUIVO: {file_path} ({project_id}) ===\n\n", "title")
+                        self.debate_text.insert(tk.END, content, "argument")
+                        self.debate_text.config(state=tk.DISABLED)
+                        self._set_status(f"Visualizando: {file_path}", ACCENT_CYAN)
+
+                    self.root.after(0, render)
+            except Exception as e:
+                self.root.after(0, lambda: self._set_status(f"Erro ao abrir arquivo: {e}", ACCENT_RED))
+
+        threading.Thread(target=load, daemon=True).start()
+
+    def _close_file_viewer(self):
+        """Fecha o visualizador de arquivo e restaura o status."""
+        self.viewer_toolbar.pack_forget()
+        self._set_status("Pronto", ACCENT_GREEN)
+
+    def _copy_file_content(self):
+        """Copia o conteúdo do arquivo atualmente visualizado para a área de transferência."""
+        if hasattr(self, "active_file_info") and self.active_file_info:
+            content = self.active_file_info[2]
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self._set_status("Código copiado para a área de transferência!", ACCENT_GREEN)
+
+    def _open_file_folder(self):
+        """Abre a pasta do projeto no Windows Explorer."""
+        if hasattr(self, "active_file_info") and self.active_file_info:
+            import os
+            from pathlib import Path
+            proj_dir = (Path(__file__).resolve().parent / "output" / self.active_file_info[0]).resolve()
+            proj_dir.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(str(proj_dir))
 
     def _load_knowledge_base(self):
         """Carrega topicos discutidos do banco em background."""
@@ -576,6 +824,7 @@ class THZMainsApp:
                 self.root.after(0, lambda: self._append_system("Conectado ao servidor. Pronto para iniciar debate."))
                 self.root.after(100, self._load_debate_history)
                 self.root.after(200, self._load_knowledge_base)
+                self.root.after(300, self._load_projects_history)
 
                 while True:
                     try:
@@ -623,7 +872,13 @@ class THZMainsApp:
         self.debate_text.config(state=tk.DISABLED)
 
         # Enviar payload
-        if mode == "single":
+        if mode in ("engineering", "content"):
+            self._set_status(f"Iniciando TeamWork ({mode})...", ACCENT_GREEN)
+            self._append_system(f"Modo TEAMWORK ({mode.upper()}) | Objetivo: {topic}")
+            self._run_teamwork_pipeline(mode, topic, model)
+            return
+
+        elif mode == "single":
             payload = {
                 "mode": "single",
                 "topic": topic,
@@ -650,6 +905,125 @@ class THZMainsApp:
         threading.Thread(target=send, daemon=True).start()
         self._start_loading("Enviando payload ao servidor...")
         self._update_progress()
+
+    def _run_teamwork_pipeline(self, mode: str, goal: str, model: str):
+        """Executa a pipeline de Teamwork via streaming SSE e atualiza a interface em tempo real."""
+        def worker():
+            self.root.after(0, lambda: self._start_loading(f"Iniciando TeamWork ({mode})..."))
+            self.root.after(0, lambda: self._append_text(f"\n{'='*70}\n", "separator"))
+            self.root.after(0, lambda: self._append_text(f"  🚀 SESSÃO DE TEAMWORK INICIADA ({mode.upper()})\n", "header_green"))
+            self.root.after(0, lambda: self._append_text(f"  Objetivo: {goal}\n", "dim"))
+            self.root.after(0, lambda: self._append_text(f"{'='*70}\n\n", "separator"))
+
+            try:
+                import urllib.request
+                req_data = json.dumps({
+                    "mode": mode,
+                    "goal": goal,
+                    "model": None if model == "auto" else model
+                }).encode("utf-8")
+
+                req = urllib.request.Request(
+                    "http://127.0.0.1:8000/api/teamwork/stream",
+                    data=req_data,
+                    headers={"Content-Type": "application/json"}
+                )
+
+                with urllib.request.urlopen(req, timeout=600) as response:
+                    for raw_line in response:
+                        line = raw_line.decode("utf-8").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        json_str = line[5:].strip()
+                        if not json_str:
+                            continue
+                        evt = json.loads(json_str)
+
+                        evt_type = evt.get("type", "")
+                        status = evt.get("status", "")
+                        msg = evt.get("message", "")
+                        step_data = evt.get("step_data") or {}
+
+                        if status == "started":
+                            self.root.after(0, lambda m=msg: self._set_status(m, ACCENT_CYAN))
+
+                        elif status == "running":
+                            role = evt.get("role", "")
+                            def on_step_start(r=role, m=msg):
+                                self._start_loading(f"{r}: {m}")
+                                self._set_status(m, ACCENT_YELLOW)
+                                self._append_text(f"\n  ⏳ [{r}] Iniciando análise e elaborando arquivos...\n", "dim")
+                            self.root.after(0, on_step_start)
+
+                        elif status == "completed":
+                            role = evt.get("role", "Especialista")
+                            role_title = step_data.get("role_title", role)
+                            stage = evt.get("stage", "")
+                            contrib = step_data.get("contribution", "")
+                            files = step_data.get("files", [])
+                            step_num = step_data.get("step_number", 1)
+                            total = step_data.get("total_steps", 6 if mode == "content" else 7)
+
+                            def on_step_done(r_title=role_title, st=stage, c=contrib, fls=files, s_n=step_num, tot=total):
+                                self._append_text(f"\n  👤 {r_title} [{st}] (Etapa {s_n}/{tot}):\n", "header_blue")
+                                self._append_text(f"  {c}\n", "argument")
+                                if fls:
+                                    self._append_text(f"  📁 Arquivos gerados:\n", "dim")
+                                    for f in fls:
+                                        self._append_text(f"     - {f}\n", "header_green")
+                                self._append_text(f"  {'─'*70}\n", "separator")
+                                pct = int((s_n / tot) * 100)
+                                self.progress_label.config(text=f"Etapa {s_n}/{tot} ({pct}%)")
+                                self._set_status(f"Etapa {s_n}/{tot} concluída por {r_title}", ACCENT_GREEN)
+                                self._load_projects_history()
+
+                            self.root.after(0, on_step_done)
+
+                        elif evt_type == "teamwork_complete":
+                            res = evt.get("result", {})
+                            out_dir = res.get("output_directory", "")
+                            summary = res.get("executive_summary", "")
+
+                            def on_finish(o=out_dir, sm=summary):
+                                self._stop_loading()
+                                self._append_text(f"\n{'='*70}\n", "separator")
+                                self._append_text(f"  ✅ TEAMWORK CONCLUÍDO COM SUCESSO!\n", "header_green")
+                                self._append_text(f"  {sm}\n\n", "argument")
+                                self._append_text(f"  📦 Arquivos salvos em: {o}\n", "title")
+                                self._append_text(f"{'='*70}\n\n", "separator")
+                                self._set_status("Teamwork finalizado com sucesso!", ACCENT_GREEN)
+                                self.running = False
+                                self.start_btn.config(state=tk.NORMAL)
+                                self.stop_btn.config(state=tk.DISABLED)
+                                self._load_projects_history()
+
+                            self.root.after(0, on_finish)
+
+                        elif evt_type == "error":
+                            def on_error(err_m=msg or evt.get("message", "Erro desconhecido")):
+                                self._stop_loading()
+                                self._append_text(f"\n  ❌ ERRO: {err_m}\n\n", "error")
+                                self._set_status(f"Erro: {err_m}", ACCENT_RED)
+                                self.running = False
+                                self.start_btn.config(state=tk.NORMAL)
+                                self.stop_btn.config(state=tk.DISABLED)
+
+                            self.root.after(0, on_error)
+
+            except Exception as e:
+                def err(err_msg=str(e)):
+                    self._stop_loading()
+                    self._append_text(f"\n  ❌ ERRO DE CONEXÃO NO TEAMWORK: {err_msg}\n\n", "error")
+                    self._set_status(f"Erro: {err_msg}", ACCENT_RED)
+                    self.running = False
+                    self.start_btn.config(state=tk.NORMAL)
+                    self.stop_btn.config(state=tk.DISABLED)
+
+                self.root.after(0, err)
+
+                self.root.after(0, err)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _stop_debate(self):
         """Para o debate atual."""
@@ -678,10 +1052,10 @@ class THZMainsApp:
         elif evt == "debate_start":
             self._stop_loading()
             num = data.get("debate_num", "?")
-            topic = data.get("topic", "?")
+            topic = data.get("topic") or "?"
             self._append_text(f"\n  DEBATE {num}: {topic}\n", "title")
             self._append_text(f"  {'─'*70}\n", "separator")
-            self._set_status(f"Debate {num}: {topic[:40]}...", ACCENT_CYAN)
+            self._set_status(f"Debate {num}: {topic[:40] if topic else '?'}...", ACCENT_CYAN)
 
         elif evt == "turn_start":
             agent = data.get("agent", "?")
@@ -783,23 +1157,28 @@ class THZMainsApp:
             self._set_status(f"Erro: {data.get('message', '?')}", ACCENT_RED)
 
     def _start_loading(self, message="Processando..."):
-        """Inicia animacao de loading."""
+        """Inicia animacao de loading com cronometro."""
+        import time
         self.loading_active = True
         self.loading_message = message
+        self.step_start_time = time.time()
         self._animate_loading()
 
     def _stop_loading(self):
         """Para animacao de loading."""
         self.loading_active = False
+        self.step_start_time = 0.0
         self.loading_frame_label.config(text="")
 
     def _animate_loading(self):
-        """Anima o indicador de loading."""
+        """Anima o indicador de loading com tempo decorrido."""
         if not self.loading_active:
             return
+        import time
         self.loading_frame = (self.loading_frame + 1) % len(LOADING_FRAMES)
         frame = LOADING_FRAMES[self.loading_frame]
-        self.loading_frame_label.config(text=f"  {frame} {self.loading_message}")
+        elapsed = int(time.time() - self.step_start_time) if self.step_start_time > 0 else 0
+        self.loading_frame_label.config(text=f"  {frame} {self.loading_message} (⏱ {elapsed}s)")
         self.root.after(100, self._animate_loading)
 
     def _start_pause_countdown(self, duration):

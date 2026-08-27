@@ -14,17 +14,26 @@ Sistema local de debates multiagente onde agentes de IA discutem temas de tecnol
 
 ## Features
 
-- **9 Agentes Especializados** — 6 tecnicos + 3 de negocio, cada um com sua expertise
-- **Debates em Tempo Real** — WebSocket + GUI Tkinter com cores por agente
-- **Modo Autonomo** — Sessoes noturnas com topics gerados automaticamente
-- **Deteccao de Plagio** — N-gramas + frases inteiras, força originalidade
-- **Anti-Loop** — Diversity score + trend analysis, encerra espirais
-- **Base de Conhecimento** — Debates anteriores alimentam novas discussões
-- **Resumo Automatico** — Resumo curto + completo ao final de cada debate
-- **Idempotencia** — Chaves unicas em mensagens, upserts atomicos, request dedup
-- **Compactacao** — Sessoes antigas comprimidas automaticamente (>30 dias)
-- **RAG + Embeddings** — Busca semantica de argumentos relevantes (opcional)
+- **9 Agentes Especializados** — 6 técnicos + 3 de negócio, cada um com sua expertise
+- **TeamWork & Linha de Produção Autônoma** — Engenharia de Software (código, testes, docker, specs) e Fábrica de Artigos Técnicos
+- **Guardrails & Zero-Trust Sandbox** — Validação estrita de escopo (tech only), AST scanner anti-danos, Path Jail e limite de steps
+- **API OpenAI-Compatible (`/v1`)** — Endpoints `/v1/models` e `/v1/chat/completions` com SSE streaming para integrar com Thz-Lang e IDEs
+- **Debates em Tempo Real** — WebSocket + GUI Tkinter com cronômetro de pensamento ao vivo e cores por agente
+- **Explorador de Projetos & Código Integrado** — Nova sidebar com abas (Debates, Projetos, Conhecimento) e leitor de arquivos
+- **Modo Autônomo** — Sessões noturnas com tópicos gerados automaticamente
+- **Base de Conhecimento & Cortex SQLite** — Inteligência acumulada no banco com WAL mode e grafos de tópicos
+- **Detecção de Plágio & Anti-Loop** — N-gramas e diversity score para forçar originalidade
 - **Fine-tuning QLoRA** — Pipeline completo para treinar modelos por agente
+
+---
+
+## 📚 Documentação Técnica
+
+- [⚙️ **TeamWork & Engenharia Autônoma**](file:///c:/Users/lucas/Projetos/thz-agents-room/docs/TEAMWORK_AND_ENGINEERING.md) — Fluxo das pipelines de software e fábrica de artigos.
+- [🛡️ **Guardrails, Sandbox & Zero-Trust**](file:///c:/Users/lucas/Projetos/thz-agents-room/docs/GUARDRAILS_AND_SECURITY.md) — Camadas de segurança, AST scanner e proteção contra loops.
+- [🔌 **Protocolo OpenAI-Compatible**](file:///c:/Users/lucas/Projetos/thz-agents-room/docs/OPENAI_COMPATIBLE_API.md) — Guia de integração com a Thz-Lang, Cursor, Continue.dev e Dify.
+- [🗄️ **Banco de Dados & Cortex DB**](file:///c:/Users/lucas/Projetos/thz-agents-room/docs/DATABASE_AND_CORTEX.md) — Estrutura de tabelas SQLite e inteligência acumulada.
+- [🖥️ **Interface Gráfica & Feedback Visual**](file:///c:/Users/lucas/Projetos/thz-agents-room/docs/GUI_AND_VISUAL_FEEDBACK.md) — Layout, cronômetro em tempo real e visualizador de arquivos.
 
 ---
 
