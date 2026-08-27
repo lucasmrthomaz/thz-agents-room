@@ -718,10 +718,14 @@ def create_agents(model: str) -> list:
             "system_prompt": (
                 f"{prompt}\n\n"
                 "DIRETIVAS OBRIGATORIAS:\n"
-                "- Idioma: Responda EXCLUSIVAMENTE em Portugues do Brasil (pt-BR).\n"
+                "- Idioma: Responda EXCLUSIVAMENTE em Portugues do Brasil (pt-BR). NUNCA use chines, arabe ou outros idiomas.\n"
                 "- Formato: Responda estritamente no esquema JSON com 'argument' e 'status'.\n"
-                "- PLAGIO: NAO copie trechos de outros agentes. Use suas proprias palavras.\n"
-                "- ORIGINALIDADE: Traga argumentos NOVOS baseados na sua expertise.\n"
+                "- PLAGIO ABSOLUTAMENTE PROIBIDO: NAO copie, NAO repita, NAO parafraseie trechos de outros agentes.\n"
+                "  Se voce copiar, o debate sera encerrado imediatamente.\n"
+                "- ORIGINALIDADE: Traga argumentos COMPLETAMENTE NOVOS baseados na sua expertise.\n"
+                "  Cada resposta deve conter ideias que NAO foram mencionadas por ninguem antes.\n"
+                "- DADOS CONCRETOS: Traga numeros, metricas, exemplos reais, fonts especificas.\n"
+                "- SUA ROLE: Fale APENAS sobre sua area de expertise. NAO discuta topicos de outros agentes.\n"
                 f"{RESPECT_RULES}"
             ),
             "model": model,
@@ -787,30 +791,70 @@ def _is_repetitive(arguments: list, threshold: float = 0.6) -> bool:
 
 
 def _is_plagiarized(argument: str, history: list, threshold: float = 0.3) -> bool:
-    """Detecta se um argumento contem trechos longos copiados de argumentos anteriores.
-    Verifica se frases de 15+ palavras aparecem em argumentos anteriores."""
-    if not history or len(argument.split()) < 20:
+    """Detecta se um argumento contem trechos copiados de argumentos anteriores.
+    Verifica frases de 8+ palavras E frases inteiras similares."""
+    if not history or len(argument.split()) < 10:
         return False
 
     arg_lower = argument.lower().strip()
     history_lower = [h["content"].lower().strip() for h in history]
 
-    # Extrair frases do argumento atual (janelas de 15 palavras)
+    # 1. Verificar n-gramas de 8 palavras (mais agressivo)
     arg_words = arg_lower.split()
-    if len(arg_words) < 15:
-        return False
+    if len(arg_words) >= 8:
+        ngram_size = 8
+        for i in range(len(arg_words) - ngram_size + 1):
+            ngram = " ".join(arg_words[i:i + ngram_size])
+            for prev_arg in history_lower:
+                if ngram in prev_arg:
+                    return True
 
-    # Gerar n-gramas de 15 palavras
-    ngram_size = 15
-    for i in range(len(arg_words) - ngram_size + 1):
-        ngram = " ".join(arg_words[i:i + ngram_size])
-
-        # Verificar se这个 n-gram aparece em algum argumento anterior
-        for prev_arg in history_lower:
-            if ngram in prev_arg:
-                return True
+    # 2. Verificar frases inteiras (separadas por . ; ! ?)
+    arg_sentences = [s.strip() for s in arg_lower.replace(";", ".").replace("!", ".").replace("?", ".").split(".") if len(s.strip()) > 20]
+    for prev_arg in history_lower:
+        prev_sentences = [s.strip() for s in prev_arg.replace(";", ".").replace("!", ".").replace("?", ".").split(".") if len(s.strip()) > 20]
+        for arg_sent in arg_sentences:
+            for prev_sent in prev_sentences:
+                # Frase identical ou quase identical
+                if arg_sent == prev_sent:
+                    return True
+                # 90% similar (substituicoes minimas)
+                if len(arg_sent) > 30 and len(prev_sent) > 30:
+                    words_a = set(arg_sent.split())
+                    words_p = set(prev_sent.split())
+                    if words_a and words_p:
+                        overlap = len(words_a & words_p) / max(len(words_a), len(words_p))
+                        if overlap > 0.9:
+                            return True
 
     return False
+
+
+def _is_valid_portuguese(text: str) -> bool:
+    """Verifica se o texto esta em portugues (nao chines, arabe, etc)."""
+    if not text or len(text) < 20:
+        return True  # Textos curtos passam
+
+    # Verificar caracteres nao-latinos (chines, japones, arabe, etc)
+    non_latin = sum(1 for c in text if ord(c) > 0x2FFF and ord(c) < 0x10000)
+    total = len(text)
+
+    if total > 0:
+        ratio = non_latin / total
+        if ratio > 0.05:  # Mais de 5% caracteres nao-latinos
+            return False
+
+    # Verificar presenca de palavras comuns em portugues
+    pt_words = {"de", "que", "nao", "uma", "por", "com", "para", "mais", "como", "mas",
+                "foi", "são", "tem", "sao", "está", "isso", "este", "essa", "disso"}
+    text_words = set(text.lower().split())
+    pt_overlap = len(text_words & pt_words)
+
+    # Se texto longo mas sem nenhuma palavra PT comum, suspeito
+    if len(text.split()) > 30 and pt_overlap == 0:
+        return False
+
+    return True
 
 
 class MultiAgentEngine:
@@ -896,7 +940,8 @@ class MultiAgentEngine:
                         instruction = (
                             "Analise o argumento do turno anterior e responda de forma critica, "
                             "apontando pros/contras e trazendo dados concretos. "
-                            "IMPORTANTE: NAO copie trechos de outros agentes. Use suas proprias palavras."
+                            "PROIBIDO COPIAR: NAO repita frases, NAO parafraseie, NAO use as mesmas palavras. "
+                            "Traga uma analise COMPLETAMENTE NOVA com dados da sua area de expertise."
                         )
 
                     # Knowledge context via RAG (substitui busca por substring)
@@ -961,6 +1006,11 @@ class MultiAgentEngine:
                     if len(history) >= 1 and _is_plagiarized(decision.argument, history):
                         effective_status = "CONSENSUS"
                         logger.info(f"[PLAGIARISM] Turno {current_turn}: trechos copiados detectados")
+
+                    # Validacao de idioma (rejeitar chines, arabe, etc)
+                    if not _is_valid_portuguese(decision.argument):
+                        effective_status = "CONSENSUS"
+                        logger.info(f"[LANGUAGE] Turno {current_turn}: texto nao-portugues detectado")
 
                     # Health monitoring (loop detector)
                     health = self.loop_detector.analyze_debate_health(history)
