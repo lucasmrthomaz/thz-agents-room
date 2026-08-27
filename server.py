@@ -699,12 +699,50 @@ async def generate_summary(model: str, topics: List[Dict]) -> str:
         logger.error(f"Erro ao gerar resumo: {e}")
         return "Resumo nao disponivel."
 
+
+async def generate_debate_summary(model: str, topic: str, history: List[Dict], consensus: bool) -> str:
+    """Gera resumo conciso de um debate individual."""
+    transcript = "\n".join(
+        f"[{h['author']} - Turno {h['turn']}]: {h['content'][:200]}..."
+        for h in history[-12:]  # Ultimos 12 turnos para caber no contexto
+    )
+
+    prompt = (
+        "Gere um resumo CONCISO deste debate tecnico entre agentes de IA.\n"
+        "Formato OBRIGATORIO (max 5 linhas):\n"
+        "- Topico: ...\n"
+        "- Posicoes principais: ... (2-3 pontos de cada lado)\n"
+        "- Consenso: ... (ou 'Sem consenso' se houve divergencia)\n"
+        "- Aprendizado chave: ... (1 insight principal)\n\n"
+        f"Topico: {topic}\n"
+        f"Resultado: {'Consenso' if consensus else 'Sem consenso'}\n"
+        f"Turnos: {len(history)}\n\n"
+        f"Transcript:\n{transcript}\n\n"
+        "Resumo:"
+    )
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "options": {"temperature": 0.3, "num_ctx": 2048}
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=90.0)
+            resp.raise_for_status()
+            return resp.json()["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"[SUMMARY] Erro ao gerar resumo do debate: {e}")
+        return ""
+
 # =====================================================================
 # 6. AGENTES
 # =====================================================================
 
 def create_agents(model: str) -> list:
-    """Cria os 8 agentes com o modelo especificado."""
+    """Cria os 9 agentes com o modelo especificado."""
     configs = [
         ("Arquiteto", "Software Architect",
          "Voce e um arquiteto de software pragmatico focado em simplicidade, "
@@ -736,6 +774,10 @@ def create_agents(model: str) -> list:
         ("Gerente", "Project Manager",
          "Voce e um Gerente de Projeto focado em prazo, recursos, "
          "riscos e orcamento. Aponte impacto em timeline e capacidade da equipe."),
+        ("Dev Senior", "Senior Developer",
+         "Voce e um desenvolvedor senior experiente focado em codigo limpo, "
+         "padroes de design, SOLID, testes unitarios e boas praticas de programacao. "
+         "Question code smells, gaps de testes e violacoes de principios SOLID."),
     ]
 
     agents = []
@@ -1080,18 +1122,34 @@ class MultiAgentEngine:
                         last_consensus = False
 
                     if consecutive_consensus >= len(self.agents) and current_turn >= self.min_turns:
+                        # Gerar resumo do debate
+                        summary = await generate_debate_summary(
+                            self.agents[0].model, topic, history, True
+                        )
                         await websocket.send_json({
                             "event": "debate_complete",
-                            "data": {"reason": "consensus", "total_turns": current_turn}
+                            "data": {
+                                "reason": "consensus",
+                                "total_turns": current_turn,
+                                "summary": summary
+                            }
                         })
                         return last_consensus
 
                     if current_turn >= self.max_turns:
                         break
 
+        # Gerar resumo do debate (timeout)
+        summary = await generate_debate_summary(
+            self.agents[0].model, topic, history, last_consensus
+        )
         await websocket.send_json({
             "event": "debate_complete",
-            "data": {"reason": "max_turns_reached", "total_turns": current_turn}
+            "data": {
+                "reason": "max_turns_reached",
+                "total_turns": current_turn,
+                "summary": summary
+            }
         })
         return last_consensus
 

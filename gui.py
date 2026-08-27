@@ -714,6 +714,7 @@ class THZMainsApp:
             self._stop_loading()
             reason = data.get("reason", "?")
             message = data.get("message", "")
+            summary = data.get("summary", "")
 
             if reason == "topic_exhausted":
                 motivo = "Topico Exaurido"
@@ -730,6 +731,14 @@ class THZMainsApp:
                 tag = "header_green" if reason == "consensus" else "header_yellow"
                 self._append_text(f"\n  DEBATE ENCERRADO — {motivo} | Turnos: {data.get('total_turns', '?')}\n", tag)
                 self._append_text(f"{'='*70}\n\n", "separator")
+
+                # Exibir resumo do debate
+                if summary:
+                    self._append_text(f"\n  RESUMO DO DEBATE:\n", "header_blue")
+                    for line in summary.split("\n"):
+                        self._append_text(f"  {line}\n", "argument")
+                    self._append_text(f"\n{'='*70}\n\n", "separator")
+
                 self._set_status(f"Debate encerrado: {motivo}", ACCENT_GREEN if reason == "consensus" else ACCENT_YELLOW)
                 # No modo autonomous, nao para — espera proximo debate
                 if self.current_mode == "single":

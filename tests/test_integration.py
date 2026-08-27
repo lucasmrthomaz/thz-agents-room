@@ -95,11 +95,11 @@ class TestAgentCreation:
     """Testes para criacao de agentes."""
 
     def test_create_agents_count(self):
-        """Testa que 8 agentes sao criados."""
+        """Testa que 9 agentes sao criados."""
         from server import create_agents
 
         agents = create_agents("qwen2.5:7b")
-        assert len(agents) == 8
+        assert len(agents) == 9
 
     def test_create_agents_names(self):
         """Testa nomes dos agentes."""
@@ -108,7 +108,7 @@ class TestAgentCreation:
         agents = create_agents("qwen2.5:7b")
         names = [a.name for a in agents]
 
-        expected = ["Arquiteto", "SRE", "DevOps", "DBA", "Security", "PO", "Scrum Master", "Gerente"]
+        expected = ["Arquiteto", "SRE", "DevOps", "DBA", "Security", "PO", "Scrum Master", "Gerente", "Dev Senior"]
         assert names == expected
 
     def test_create_agents_model(self):
