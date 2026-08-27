@@ -1437,7 +1437,9 @@ async def debate_websocket(websocket: WebSocket):
 
             while datetime.now() < end_time and not shutdown_manager.should_exit:
                 history_topics = await CortexDB.get_discussed_topics()
-                topic = await generate_topic(model, history_topics + topics_used)
+                # Extrair topicos strings de topics_used (que contem dicts)
+                used_topic_strings = [t["topic"] if isinstance(t, dict) else t for t in topics_used]
+                topic = await generate_topic(model, history_topics + used_topic_strings)
                 debate_count += 1
 
                 # Atualiza estado para shutdown
