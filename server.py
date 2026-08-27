@@ -725,17 +725,57 @@ def create_agents(model: str) -> list:
 # 7. ORQUESTRADOR (FSM)
 # =====================================================================
 
-def _is_repetitive(arguments: list, threshold: float = 0.8) -> bool:
-    """Detecta se 3 argumentos sao muito similares (repeticao do LLM)."""
+def _is_repetitive(arguments: list, threshold: float = 0.6) -> bool:
+    """Detecta espiral de repeticao no debate.
+    Verifica janelas de 3, 4 e 5 argumentos com threshold progressivo."""
     if len(arguments) < 3:
         return False
-    last_3 = [a.lower().strip() for a in arguments[-3:]]
-    words = [set(arg.split()) for arg in last_3]
-    intersection = words[0] & words[1] & words[2]
-    union = words[0] | words[1] | words[2]
-    if not union:
-        return False
-    return len(intersection) / len(union) > threshold
+
+    # Normalizar argumentos
+    normalized = [a.lower().strip() for a in arguments]
+
+    # Verificar frases repetidas (primeiras 50 chars sao muito similares)
+    for i in range(len(normalized) - 2):
+        chunk = normalized[i][:50]
+        for j in range(i + 1, len(normalized)):
+            if normalized[j][:50] == chunk and chunk:
+                return True
+
+    # Verificar por palavras-chave repetidas (topicos principais)
+    stop_words = {"o", "a", "e", "de", "do", "da", "em", "um", "uma", "com", "para",
+                  "por", "que", "se", "nao", "mais", "como", "tambem", "porem", "ja"}
+
+    def get_keywords(text):
+        words = set(text.split()) - stop_words
+        return words
+
+    # Verificar janela de 5 argumentos
+    if len(normalized) >= 5:
+        last_5 = normalized[-5:]
+        keywords_5 = [get_keywords(a) for a in last_5]
+        all_kw = set().union(*keywords_5)
+        common = keywords_5[0] & keywords_5[1] & keywords_5[2] & keywords_5[3] & keywords_5[4]
+        if all_kw and len(common) / len(all_kw) > 0.5:
+            return True
+
+    # Verificar janela de 4 argumentos
+    if len(normalized) >= 4:
+        last_4 = normalized[-4:]
+        keywords_4 = [get_keywords(a) for a in last_4]
+        all_kw = set().union(*keywords_4)
+        common = keywords_4[0] & keywords_4[1] & keywords_4[2] & keywords_4[3]
+        if all_kw and len(common) / len(all_kw) > 0.55:
+            return True
+
+    # Verificar janela de 3 argumentos (original, mas mais flexivel)
+    last_3 = normalized[-3:]
+    keywords_3 = [get_keywords(a) for a in last_3]
+    all_kw = set().union(*keywords_3)
+    common = keywords_3[0] & keywords_3[1] & keywords_3[2]
+    if all_kw and len(common) / len(all_kw) > threshold:
+        return True
+
+    return False
 
 
 class MultiAgentEngine:
@@ -836,10 +876,10 @@ class MultiAgentEngine:
 
                     # Deteccao de repeticao do LLM
                     if len(history) >= 3:
-                        recent_args = [h["content"] for h in history[-3:]]
+                        recent_args = [h["content"] for h in history[-5:]] if len(history) >= 5 else [h["content"] for h in history[-3:]]
                         if _is_repetitive(recent_args):
                             effective_status = "CONSENSUS"
-                            logger.info(f"[REPETITION] Turno {current_turn}: 3 argumentos similares detectados")
+                            logger.info(f"[REPETITION] Turno {current_turn}: espiral de repeticao detectada")
 
                     await CortexDB.save_message(
                         conversation_id, agent.name, decision.argument, effective_status, current_turn
