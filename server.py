@@ -326,57 +326,102 @@ RESPECT_RULES = (
     "- Nao seja condescendente: traga numeros, limites de hardware e impactos operacionais."
 )
 
+FALLBACK_TOPICS = [
+    "Microservicos vs Monolito: quando a complexidade nao compensa",
+    "Kafka vs RabbitMQ: qual fila de mensagens escolher?",
+    "CI/CD com GitHub Actions vs GitLab CI: prós e contras",
+    "Docker vs Podman: vale a pena trocar?",
+    "PostgreSQL vs MongoDB: quando o NoSQL nao e a resposta",
+    "Testes unitarios vs integracao: onde parar?",
+    "API REST vs gRPC: performance e manutenibilidade",
+    "Observabilidade: Grafana + Prometheus ou solucoes gerenciadas?",
+    "Feature flags: como gerenciar releases sem dor de cabeca",
+    "Git flow vs trunk-based development: qual adotar?",
+    "Cache invalidation: padroes eficazes em producao",
+    "Event sourcing: quando vale a pena implementar?",
+    "Cloud AWS vs Azure vs GCP: fatores de decisao",
+    "Squad autonomo: como evitar silos de conhecimento",
+    "Code review eficaz: padroes e anti-patterns",
+    "Migracao de legado: estrategias para sistemas criticos",
+    "Kubernetes: vale a pena para equipes pequenas?",
+    "Seguranca em APIs: OAuth2, JWT e boas praticas",
+    "Banco de dados: conexoes, pooling e concorrencia",
+    "Monitoramento: como definir SLAs e SLOs eficazes",
+]
+
 async def generate_topic(model: str, history_topics: List[str]) -> str:
     """Pede ao Ollama para sugerir um topico de debate."""
-    already = "\n".join(f"- {t}" for t in history_topics[-30:]) if history_topics else "Nenhum"
+    import random
+
+    # Se ja tem muitos topicos, usa fallback
+    if len(history_topics) >= 15:
+        used = set(history_topics[-20:])
+        available = [t for t in FALLBACK_TOPICS if t not in used]
+        if available:
+            return random.choice(available)
+        return random.choice(FALLBACK_TOPICS)
+
+    already = "\n".join(f"- {t}" for t in history_topics[-20:]) if history_topics else "Nenhum"
 
     prompt = (
-        "Voce e um gerador de topicos de debate para engenheiros de software. "
-        "Sugira UM topico tecnico relevante e especifico para debate.\n\n"
-        "REGRAS:\n"
-        "- SO sugira sobre: programacao, arquitetura, git, SO, lideranca, "
-        "humano-computador, devops, bancos de dados, seguranca.\n"
-        "- Nao repita topicos ja discutidos.\n"
-        "- Seja especifico (ex: 'Kafka vs RabbitMQ para fila de 10k msgs/s' ao inves de 'messaging').\n"
-        "- Responda APENAS com o topico, sem explicacao ou formatacao.\n\n"
-        f"Topicos ja discutidos:\n{already}\n\n"
-        "Topico sugerido:"
+        "Sugira UM topico de debate tecnico para engenheiros de software.\n"
+        "Responda SOMENTE com o topico. Nao explique.\n"
+        "Exemplos de bons topicos:\n"
+        "- Kafka vs RabbitMQ para fila de eventos\n"
+        "- Quando usar Redis ao inves de PostgreSQL\n"
+        "- Git flow vs trunk-based development\n\n"
+        f"Topicos ja usados:\n{already}\n\n"
+        "Topico:"
     )
 
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        "options": {"temperature": 0.8, "num_ctx": 2048}
+        "format": {"type": "object", "properties": {"topic": {"type": "string"}}, "required": ["topic"]},
+        "options": {"temperature": 0.7, "num_ctx": 1024}
     }
 
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=60.0)
+            resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=90.0)
             resp.raise_for_status()
-            topic = resp.json()["message"]["content"].strip().strip('"').strip("'")
-            logger.info(f"Topico gerado por Ollama: {topic}")
-            return topic
+            raw = resp.json()["message"]["content"]
+
+            # Tenta parsear como JSON estruturado
+            try:
+                data = json.loads(raw)
+                topic = data.get("topic", "").strip()
+            except json.JSONDecodeError:
+                topic = raw.strip().strip('"').strip("'").strip()
+
+            # Validacao: topico deve ter entre 10 e 150 caracteres
+            if 10 <= len(topic) <= 150 and not topic.startswith("{"):
+                logger.info(f"Topico gerado: {topic}")
+                return topic
+            else:
+                logger.warning(f"Topico invalido gerado: {topic[:80]}...")
+                return random.choice(FALLBACK_TOPICS)
+
     except Exception as e:
         logger.error(f"Erro ao gerar topico: {e}")
-        return "Arquitetura de microsservicos vs monolito para APIs de alta demanda"
+        return random.choice(FALLBACK_TOPICS)
 
 async def generate_summary(model: str, topics: List[Dict]) -> str:
-    """Gera resumo da sessao noturna."""
+    """Gera resumo da sessao de debates."""
     topics_text = "\n".join(
         f"- {t['topic']} ({'consenso' if t['consensus'] else 'sem consenso'})"
         for t in topics
     )
 
     prompt = (
-        "Voce e um redator de resumo executivo. Gere um resumo conciso da sessao de debate noturna.\n\n"
-        "FORMATO:\n"
-        "1. Visao Geral (1-2 frases)\n"
-        "2. Topicos Discutidos (lista com resultado)\n"
-        "3. Consensos Alcancados\n"
-        "4. Pontos de Divergencia\n"
-        "5. Decisoes Tecnicas Relevantes\n\n"
-        f"Topicos discutidos:\n{topics_text}\n\n"
+        "Gere um resumo executivo desta sessao de debate entre agentes de IA.\n"
+        "Seja conciso. Inclua:\n"
+        "1. Visao geral\n"
+        "2. Topicos discutidos\n"
+        "3. Consensos\n"
+        "4. Divergencias\n\n"
+        f"Topicos:\n{topics_text}\n\n"
         "Resumo:"
     )
 
@@ -384,7 +429,7 @@ async def generate_summary(model: str, topics: List[Dict]) -> str:
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        "options": {"temperature": 0.3, "num_ctx": 4096}
+        "options": {"temperature": 0.3, "num_ctx": 2048}
     }
 
     try:
