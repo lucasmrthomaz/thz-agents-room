@@ -630,13 +630,23 @@ class THZMainsApp:
         threading.Thread(target=load, daemon=True).start()
 
     def _render_knowledge_base(self, topics):
-        """Renderiza a lista de topicos discutidos na sidebar."""
+        """Renderiza a lista de topicos discutidos e botão de auditoria do Livro-Verdade."""
         for widget in self.knowledge_inner.winfo_children():
             widget.destroy()
 
+        btn_audit = tk.Button(
+            self.knowledge_inner, text="🛡️ Auditar Livro-Verdade (SSOT)", font=("Segoe UI", 9, "bold"),
+            bg=ACCENT_CYAN, fg=BG_DARK, relief=tk.FLAT, padx=6, pady=4,
+            command=self._run_integrity_audit, cursor="hand2"
+        )
+        btn_audit.pack(fill=tk.X, padx=10, pady=(10, 8))
+
+        lbl_sec = tk.Label(self.knowledge_inner, text="Tópicos no Cortex:", fg=FG_DIM, bg=BG_MID, font=("Segoe UI", 8, "bold"), anchor=tk.W)
+        lbl_sec.pack(fill=tk.X, padx=10, pady=(4, 2))
+
         if not topics:
             tk.Label(
-                self.knowledge_inner, text="Nenhum topico ainda", fg=FG_DIM, bg=BG_MID,
+                self.knowledge_inner, text="Nenhum tópico ainda", fg=FG_DIM, bg=BG_MID,
                 font=("Segoe UI", 9), wraplength=220
             ).pack(padx=10, pady=10)
             return
@@ -647,6 +657,59 @@ class THZMainsApp:
                 self.knowledge_inner, text=f"• {topic_text[:40]}", fg=FG_PRIMARY, bg=BG_MID,
                 font=("Segoe UI", 9), anchor=tk.W, wraplength=220
             ).pack(fill=tk.X, padx=10, pady=1)
+
+    def _run_integrity_audit(self):
+        """Executa auditoria de rastreabilidade 100% (Livro-Verdade) e exibe na tela."""
+        self._set_status("Auditando integridade do Livro-Verdade (Cortex + Manifestos + Disco)...", ACCENT_CYAN)
+
+        def do_audit():
+            try:
+                import asyncio as _asyncio
+                from stability.integrity_auditor import IntegrityAuditor
+                loop = _asyncio.new_event_loop()
+                _asyncio.set_event_loop(loop)
+                report = loop.run_until_complete(IntegrityAuditor.audit_repository())
+                loop.close()
+
+                def show_report(rep=report):
+                    self.viewer_toolbar.pack(fill=tk.X, padx=5, pady=(5, 0))
+                    self.viewer_title_label.config(text=f"🛡️ RELATÓRIO DE AUDITORIA: LIVRO-VERDADE (Score: {rep['integrity_score_pct']}%)")
+                    self.active_file_info = ("audit", "report.json", json.dumps(rep, indent=2, ensure_ascii=False))
+
+                    self.debate_text.config(state=tk.NORMAL)
+                    self.debate_text.delete("1.0", tk.END)
+                    self.debate_text.insert(tk.END, "╔══════════════════════════════════════════════════════════════════════════════╗\n", "header_cyan")
+                    self.debate_text.insert(tk.END, f"║  🛡️  AUDITORIA DE INTEGRIDADE & LIVRO-VERDADE (SSOT TRACEABILITY)             ║\n", "header_cyan")
+                    self.debate_text.insert(tk.END, f"║  Status: {rep['status']}  |  Score de Integridade: {rep['integrity_score_pct']}%                               ║\n", "header_green" if rep["status"] == "HEALTHY" else "header_yellow")
+                    self.debate_text.insert(tk.END, "╚══════════════════════════════════════════════════════════════════════════════╝\n\n", "header_cyan")
+
+                    sum_d = rep["summary"]
+                    self.debate_text.insert(tk.END, f"📊 RESUMO DO LIVRO-RAZÃO:\n", "header_blue")
+                    self.debate_text.insert(tk.END, f"  • Total de Artefatos Rastreados no SQLite: {sum_d['total_tracked_in_db']}\n", "argument")
+                    self.debate_text.insert(tk.END, f"  • Arquivos 100% Íntegros e Verificados (SHA-256): {sum_d['verified_intact']}\n", "header_green")
+                    self.debate_text.insert(tk.END, f"  • Arquivos Faltantes no Disco: {sum_d['missing_on_disk']}\n", "header_yellow" if sum_d['missing_on_disk'] > 0 else "argument")
+                    self.debate_text.insert(tk.END, f"  • Arquivos Modificados / Adulterados: {sum_d['tampered_or_modified']}\n", "header_red" if sum_d['tampered_or_modified'] > 0 else "argument")
+                    self.debate_text.insert(tk.END, f"  • Arquivos Órfãos no Disco (Sem Registro): {sum_d['orphans_on_disk']}\n\n", "dim")
+
+                    if rep["details"]["missing_files"]:
+                        self.debate_text.insert(tk.END, "⚠️ ARQUIVOS FALTANTES:\n", "header_yellow")
+                        for m in rep["details"]["missing_files"]:
+                            self.debate_text.insert(tk.END, f"  - [{m['project_name']}] {m['file_path']} (Esperado SHA: {m['expected_sha256'][:12] if m['expected_sha256'] else 'N/A'})\n", "dim")
+                        self.debate_text.insert(tk.END, "\n")
+
+                    if rep["details"]["sample_verified"]:
+                        self.debate_text.insert(tk.END, "✅ AMOSTRA DE ARQUIVOS VERIFICADOS:\n", "header_green")
+                        for v in rep["details"]["sample_verified"]:
+                            self.debate_text.insert(tk.END, f"  - [{v['project_name']}] {v['file_path']} ({v['size_bytes']} bytes) -> SHA-256: {v['sha256_hash'][:16]}...\n", "dim")
+
+                    self.debate_text.config(state=tk.DISABLED)
+                    self._set_status(f"Auditoria concluída: {rep['integrity_score_pct']}% de conformidade", ACCENT_GREEN if rep["status"] == "HEALTHY" else ACCENT_YELLOW)
+
+                self.root.after(0, show_report)
+            except Exception as e:
+                self.root.after(0, lambda: self._set_status(f"Erro na auditoria: {e}", ACCENT_RED))
+
+        threading.Thread(target=do_audit, daemon=True).start()
 
     def _render_debate_history(self, debates):
         """Renderiza a lista de debates na sidebar."""

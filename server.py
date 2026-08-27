@@ -219,6 +219,17 @@ async def _migrate_db(db):
         await db.execute("ALTER TABLE messages ADD COLUMN idempotency_key TEXT;")
         logger.info("[MIGRATE] Adicionado idempotency_key em messages")
 
+    # Migrar teamwork_artifacts se existir
+    async with db.execute("PRAGMA table_info(teamwork_artifacts)") as cursor:
+        art_cols = {row[1] for row in await cursor.fetchall()}
+    if art_cols:
+        if "artifact_uuid" not in art_cols:
+            await db.execute("ALTER TABLE teamwork_artifacts ADD COLUMN artifact_uuid TEXT;")
+            logger.info("[MIGRATE] Adicionado artifact_uuid em teamwork_artifacts")
+        if "sha256_hash" not in art_cols:
+            await db.execute("ALTER TABLE teamwork_artifacts ADD COLUMN sha256_hash TEXT;")
+            logger.info("[MIGRATE] Adicionado sha256_hash em teamwork_artifacts")
+
     await db.commit()
 
 # =====================================================================
@@ -404,11 +415,17 @@ class CortexDB:
 
     @staticmethod
     async def save_teamwork_session(
-        session_id: str, project_name: str, mode: str, goal: str,
-        output_dir: str, executive_summary: str, total_steps: int,
-        artifacts: list = None, status: str = "completed"
+        session_id: str,
+        project_name: str,
+        mode: str,
+        goal: str,
+        output_dir: str,
+        executive_summary: str = "",
+        total_steps: int = 0,
+        status: str = "completed",
+        artifacts: Optional[List[Any]] = None
     ):
-        """Salva a sessão de Teamwork e seus artefatos no Cortex DB."""
+        """Salva a sessão de teamwork e registra os artefatos com integridade criptográfica no banco Cortex."""
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO teamwork_sessions
@@ -417,17 +434,26 @@ class CortexDB:
             """, (session_id, project_name, mode, goal, status, output_dir, executive_summary, total_steps))
 
             if artifacts:
+                import hashlib
+                import uuid as _uuid
                 for art in artifacts:
                     path = art.get("path") if isinstance(art, dict) else getattr(art, "path", str(art))
                     f_type = art.get("file_type") if isinstance(art, dict) else getattr(art, "file_type", "")
                     role = art.get("author_role") if isinstance(art, dict) else getattr(art, "author_role", "")
                     content = art.get("content") if isinstance(art, dict) else getattr(art, "content", "")
                     c_len = len(content) if content else 0
+                    art_uuid = art.get("uuid") if isinstance(art, dict) else getattr(art, "uuid", None)
+                    if not art_uuid:
+                        art_uuid = f"art_{_uuid.uuid4().hex[:12]}"
+                    sha = art.get("sha256_hash") if isinstance(art, dict) else getattr(art, "sha256_hash", None)
+                    if not sha and content:
+                        sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
                     await db.execute("""
                         INSERT INTO teamwork_artifacts
-                            (session_id, project_name, file_path, file_type, author_role, content_length)
-                        VALUES (?, ?, ?, ?, ?, ?);
-                    """, (session_id, project_name, path, f_type, role, c_len))
+                            (session_id, project_name, file_path, file_type, author_role, content_length, artifact_uuid, sha256_hash)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                    """, (session_id, project_name, path, f_type, role, c_len, art_uuid, sha))
 
             await db.commit()
 
@@ -2024,6 +2050,18 @@ async def get_workspace_files(project_id: str):
     """Lista todos os arquivos gerados de um projeto no disco."""
     files = WorkspaceManager.get_project_tree(project_id)
     return {"project_id": project_id, "files": files, "total_files": len(files)}
+
+
+@app.get("/api/integrity/audit")
+async def audit_repository_integrity():
+    """
+    Audita o Livro-Verdade (SSOT) do sistema:
+    Compara SQLite (CortexDB), Manifestos JSON e arquivos em disco.
+    Retorna o relatório completo de conformidade criptográfica (SHA-256 e UUIDs).
+    """
+    from stability.integrity_auditor import IntegrityAuditor
+    report = await IntegrityAuditor.audit_repository()
+    return report
 
 
 # =====================================================================

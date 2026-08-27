@@ -52,10 +52,12 @@ class TeamworkStage(str, Enum):
 
 
 class TeamworkArtifact(BaseModel):
+    uuid: Optional[str] = Field(default=None, description="Identificador único global do artefato (UUID).")
     path: str = Field(description="Caminho relativo do arquivo (ex: 'src/auth.py', 'schema.sql', 'README.md')")
     content: str = Field(description="Conteúdo textual completo do arquivo.")
     file_type: Literal["code", "sql", "yaml", "markdown", "json", "config"] = Field(default="code")
     author_role: str = Field(description="Papel do agente que gerou o arquivo.")
+    sha256_hash: Optional[str] = Field(default=None, description="Assinatura criptográfica SHA-256 do conteúdo.")
     created_at: Optional[str] = None
 
 

@@ -58,11 +58,19 @@ class WorkspaceManager:
             else:
                 f_type = "config"
 
+            import hashlib
+            import uuid as _uuid
+            content_bytes = content.encode("utf-8")
+            sha256_val = hashlib.sha256(content_bytes).hexdigest()
+            art_id = f"art_{_uuid.uuid4().hex[:12]}"
+
             artifacts.append(TeamworkArtifact(
+                uuid=art_id,
                 path=clean_path,
                 content=content,
                 file_type=f_type,
                 author_role=author_role,
+                sha256_hash=sha256_val,
                 created_at=datetime.now().isoformat()
             ))
 
@@ -93,17 +101,21 @@ class WorkspaceManager:
             except Exception as e:
                 logger.error(f"[WORKSPACE] Erro ao salvar {art.path}: {e}")
 
-        # Salvar manifesto do projeto com metadados estruturados
+        # Salvar manifesto do projeto com metadados estruturados e hashes SHA-256
         try:
+            import hashlib
+            import uuid as _uuid
             manifest_data = {
                 "project_id": project_id,
                 "created_at": datetime.now().isoformat(),
                 "total_files": len(final_artifacts),
                 "files": [
                     {
+                        "uuid": a.uuid or f"art_{_uuid.uuid4().hex[:12]}",
                         "path": a.path,
                         "file_type": a.file_type,
                         "author_role": a.author_role,
+                        "sha256_hash": a.sha256_hash or hashlib.sha256(a.content.encode("utf-8")).hexdigest(),
                         "size_bytes": len(a.content.encode("utf-8"))
                     }
                     for a in final_artifacts
