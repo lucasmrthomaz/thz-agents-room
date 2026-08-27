@@ -45,6 +45,9 @@ STATUS_COLORS = {
     "STOP": "#f38ba8",
 }
 
+# Animacao de loading
+LOADING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
 
 class THZMainsApp:
     """Aplicacao principal THZ Minds."""
@@ -52,8 +55,8 @@ class THZMainsApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("THZ Minds — Motor Multiagente Local")
-        self.root.geometry("1000x700")
-        self.root.minsize(800, 500)
+        self.root.geometry("1000x750")
+        self.root.minsize(800, 550)
         self.root.configure(bg=BG_DARK)
 
         self.server_running = False
@@ -63,6 +66,10 @@ class THZMainsApp:
         self.thread = None
         self.running = False
         self.current_mode = None
+        self.loading_frame = 0
+        self.loading_active = False
+        self.current_turn = 0
+        self.max_turns = 48
 
         self._setup_styles()
         self._build_ui()
@@ -82,6 +89,7 @@ class THZMainsApp:
         self.style.configure("Header.TLabel", font=("Segoe UI", 18, "bold"), foreground=ACCENT_CYAN)
         self.style.configure("Sub.TLabel", font=("Segoe UI", 9), foreground=FG_DIM)
         self.style.configure("Status.TLabel", font=("Consolas", 9), foreground=FG_DIM)
+        self.style.configure("Loading.TLabel", font=("Consolas", 12), foreground=ACCENT_CYAN)
 
     def _build_ui(self):
         """Constrói a interface."""
@@ -193,6 +201,13 @@ class THZMainsApp:
         # Separator
         ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X, padx=15, pady=5)
 
+        # Loading indicator
+        self.loading_frame_label = tk.Label(
+            self.root, text="", fg=ACCENT_CYAN, bg=BG_DARK,
+            font=("Consolas", 12), anchor=tk.W
+        )
+        self.loading_frame_label.pack(fill=tk.X, padx=15, pady=(0, 2))
+
         # Area de debate
         debate_frame = ttk.Frame(self.root)
         debate_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 5))
@@ -212,6 +227,7 @@ class THZMainsApp:
         self.debate_text.tag_configure("status_consensus", foreground=STATUS_COLORS["CONSENSUS"], font=("Consolas", 10, "bold"))
         self.debate_text.tag_configure("status_stop", foreground=STATUS_COLORS["STOP"], font=("Consolas", 10, "bold"))
         self.debate_text.tag_configure("error", foreground=ACCENT_RED, font=("Consolas", 10, "bold"))
+        self.debate_text.tag_configure("loading", foreground=ACCENT_CYAN, font=("Consolas", 10, "italic"))
 
         for agent, color in AGENT_COLORS.items():
             self.debate_text.tag_configure(f"agent_{agent}", foreground=color, font=("Consolas", 10, "bold"))
@@ -220,6 +236,7 @@ class THZMainsApp:
         self.debate_text.tag_configure("header_blue", foreground=ACCENT_BLUE, font=("Consolas", 10, "bold"))
         self.debate_text.tag_configure("header_green", foreground=ACCENT_GREEN, font=("Consolas", 10, "bold"))
         self.debate_text.tag_configure("header_yellow", foreground=ACCENT_YELLOW, font=("Consolas", 10, "bold"))
+        self.debate_text.tag_configure("system", foreground=ACCENT_MAGENTA, font=("Consolas", 9, "italic"))
 
         # Barra de status
         status_bar = ttk.Frame(self.root)
@@ -227,6 +244,9 @@ class THZMainsApp:
 
         self.status_label = ttk.Label(status_bar, text="Pronto", style="Status.TLabel")
         self.status_label.pack(side=tk.LEFT)
+
+        self.progress_label = ttk.Label(status_bar, text="", style="Status.TLabel")
+        self.progress_label.pack(side=tk.LEFT, padx=(20, 0))
 
         self.turn_label = ttk.Label(status_bar, text="", style="Status.TLabel")
         self.turn_label.pack(side=tk.RIGHT)
@@ -252,7 +272,7 @@ class THZMainsApp:
         self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
 
-        # Verificar se servidor subiu
+        self._set_status("Iniciando servidor...", ACCENT_YELLOW)
         self.root.after(1500, self._check_server)
 
     def _check_server(self):
@@ -263,10 +283,12 @@ class THZMainsApp:
             if req.status == 200:
                 self.server_running = True
                 self.server_status.config(text="● Servidor online", fg=ACCENT_GREEN)
+                self._set_status("Servidor online. Conectando...", ACCENT_GREEN)
                 self._connect_ws()
                 return
         except Exception:
             pass
+        self._set_status("Aguardando servidor...", ACCENT_YELLOW)
         self.root.after(1000, self._check_server)
 
     def _connect_ws(self):
@@ -286,8 +308,10 @@ class THZMainsApp:
                 self.ws = ws
                 self.connected = True
                 self.root.after(0, lambda: self.server_status.config(text="● Conectado", fg=ACCENT_GREEN))
+                self.root.after(0, lambda: self._set_status("Pronto para debate", ACCENT_GREEN))
+                self.root.after(0, lambda: self._append_system("Conectado ao servidor. Pronto para iniciar debate."))
 
-                while self.running:
+                while True:
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=0.5)
                         event = json.loads(raw)
@@ -295,9 +319,11 @@ class THZMainsApp:
                     except asyncio.TimeoutError:
                         continue
                     except websockets.exceptions.ConnectionClosed:
+                        self.root.after(0, lambda: self._append_system("Conexao WebSocket encerrada."))
                         break
         except Exception as e:
             self.root.after(0, lambda: self.server_status.config(text=f"● Erro: {e}", fg=ACCENT_RED))
+            self.root.after(0, lambda: self._set_status(f"Erro de conexao: {e}", ACCENT_RED))
 
     def _start_debate(self):
         """Inicia um debate."""
@@ -320,6 +346,8 @@ class THZMainsApp:
 
         self.running = True
         self.current_mode = mode
+        self.current_turn = 0
+        self.max_turns = int(turns) if turns.isdigit() else 48
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
 
@@ -333,10 +361,12 @@ class THZMainsApp:
             payload = {
                 "mode": "single",
                 "topic": topic,
-                "max_turns": int(turns) if turns.isdigit() else 48,
+                "max_turns": self.max_turns,
                 "num_ctx": 8192,
                 "model": None if model == "auto" else model
             }
+            self._set_status(f"Iniciando debate: {topic[:50]}...", ACCENT_BLUE)
+            self._append_system(f"Modo SINGLE | Topico: {topic} | Turnos: {self.max_turns}")
         else:
             payload = {
                 "mode": "autonomous",
@@ -344,20 +374,24 @@ class THZMainsApp:
                 "num_ctx": 8192,
                 "model": None if model == "auto" else model
             }
+            self._set_status(f"Iniciando sessao autonoma ({hours}h)...", ACCENT_YELLOW)
+            self._append_system(f"Modo AUTONOMO | Duracao: {hours}h | Turnos/debate: {self.max_turns}")
 
         def send():
             if self.loop and self.ws:
                 asyncio.run_coroutine_threadsafe(self.ws.send(json.dumps(payload)), self.loop)
 
         threading.Thread(target=send, daemon=True).start()
-        self.status_label.config(text=f"Modo: {mode.upper()} | Conectado")
+        self._start_loading("Enviando payload ao servidor...")
+        self._update_progress()
 
     def _stop_debate(self):
         """Para o debate atual."""
         self.running = False
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
-        self.status_label.config(text="Parado pelo usuario")
+        self._stop_loading()
+        self._set_status("Parado pelo usuario", ACCENT_RED)
         self._append_text("\n  ■ Debate interrompido pelo usuario\n\n", "error")
 
     def _handle_event(self, event):
@@ -366,27 +400,36 @@ class THZMainsApp:
         data = event.get("data", {})
 
         if evt == "session_start":
+            self._stop_loading()
             self._append_text(f"\n{'='*70}\n", "separator")
             self._append_text(f"  SESSAO INICIADA\n", "header_blue")
             self._append_text(f"  ID: {data.get('session_id', '?')}\n", "dim")
             self._append_text(f"  Duracao: {data.get('duration_hours', '?')}h\n", "dim")
             self._append_text(f"  Modelo: {data.get('model', '?')}\n", "dim")
             self._append_text(f"{'='*70}\n\n", "separator")
+            self._set_status("Sessao autonoma em andamento...", ACCENT_YELLOW)
 
         elif evt == "debate_start":
+            self._stop_loading()
             num = data.get("debate_num", "?")
             topic = data.get("topic", "?")
             self._append_text(f"\n  DEBATE {num}: {topic}\n", "title")
             self._append_text(f"  {'─'*70}\n", "separator")
+            self._set_status(f"Debate {num}: {topic[:40]}...", ACCENT_CYAN)
 
         elif evt == "turn_start":
             agent = data.get("agent", "?")
             turn = data.get("turn", "?")
+            self.current_turn = turn
             tag = f"agent_{agent}" if agent in AGENT_COLORS else "dim"
             self._append_text(f"\n  Turno {turn} — ", "dim")
             self._append_text(f"{agent}...\n", tag)
+            self._set_status(f"Turno {turn}/{self.max_turns} — {agent} analisando...", ACCENT_CYAN)
+            self._start_loading(f"{agent} gerando argumento...")
+            self._update_progress()
 
         elif evt == "turn_end":
+            self._stop_loading()
             agent = data.get("agent", "?")
             arg = data.get("argument", "Sem conteudo.")
             status = data.get("status", "?")
@@ -398,9 +441,11 @@ class THZMainsApp:
             self._append_text(f"  [{status}]\n", status_tag)
             self._append_text(f"  {'─'*70}\n", "separator")
 
-            self.turn_label.config(text=f"Turno: {turn}" if (turn := data.get("turn")) else "")
+            self._set_status(f"Turno {turn}/{self.max_turns} — {status}", STATUS_COLORS.get(status, FG_DIM))
+            self._update_progress()
 
         elif evt == "debate_complete":
+            self._stop_loading()
             reason = data.get("reason", "?")
             motivo = "Consenso" if reason == "consensus" else "Timeout"
             tag = "header_green" if reason == "consensus" else "header_yellow"
@@ -409,8 +454,10 @@ class THZMainsApp:
             self.running = False
             self.start_btn.config(state=tk.NORMAL)
             self.stop_btn.config(state=tk.DISABLED)
+            self._set_status(f"Debate encerrado: {motivo}", ACCENT_GREEN if reason == "consensus" else ACCENT_YELLOW)
 
         elif evt == "session_complete":
+            self._stop_loading()
             self._append_text(f"\n{'='*70}\n", "separator")
             self._append_text(f"  SESSAO ENCERRADA\n", "header_yellow")
             self._append_text(f"  Total de debates: {data.get('total_debates', '?')}\n", "dim")
@@ -426,12 +473,51 @@ class THZMainsApp:
             self.running = False
             self.start_btn.config(state=tk.NORMAL)
             self.stop_btn.config(state=tk.DISABLED)
+            self._set_status("Sessao encerrada", ACCENT_GREEN)
 
         elif evt == "error":
+            self._stop_loading()
             self._append_text(f"\n  ERRO: {data.get('message', '?')}\n\n", "error")
             self.running = False
             self.start_btn.config(state=tk.NORMAL)
             self.stop_btn.config(state=tk.DISABLED)
+            self._set_status(f"Erro: {data.get('message', '?')}", ACCENT_RED)
+
+    def _start_loading(self, message="Processando..."):
+        """Inicia animacao de loading."""
+        self.loading_active = True
+        self.loading_message = message
+        self._animate_loading()
+
+    def _stop_loading(self):
+        """Para animacao de loading."""
+        self.loading_active = False
+        self.loading_frame_label.config(text="")
+
+    def _animate_loading(self):
+        """Anima o indicador de loading."""
+        if not self.loading_active:
+            return
+        self.loading_frame = (self.loading_frame + 1) % len(LOADING_FRAMES)
+        frame = LOADING_FRAMES[self.loading_frame]
+        self.loading_frame_label.config(text=f"  {frame} {self.loading_message}")
+        self.root.after(100, self._animate_loading)
+
+    def _set_status(self, text, color=None):
+        """Atualiza barra de status."""
+        self.status_label.config(text=text)
+        if color:
+            self.status_label.config(foreground=color)
+
+    def _update_progress(self):
+        """Atualiza indicador de progresso."""
+        if self.current_turn > 0:
+            pct = int((self.current_turn / self.max_turns) * 100)
+            bar_len = 20
+            filled = int(bar_len * self.current_turn / self.max_turns)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            self.progress_label.config(text=f"[{bar}] {pct}%")
+            self.turn_label.config(text=f"Turno {self.current_turn}/{self.max_turns}")
 
     def _append_text(self, text, tag=None):
         """Adiciona texto a area de debate."""
@@ -442,6 +528,10 @@ class THZMainsApp:
             self.debate_text.insert(tk.END, text)
         self.debate_text.see(tk.END)
         self.debate_text.config(state=tk.DISABLED)
+
+    def _append_system(self, text):
+        """Adiciona mensagem de sistema."""
+        self._append_text(f"  [SYS] {text}\n", "system")
 
     def run(self):
         """Inicia a aplicacao."""

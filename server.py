@@ -763,6 +763,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="THz Room - Multi-Agent Autonomous Engine", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+async def _get_transcript(conversation_id: str) -> list:
+    """Busca transcript de um debate no banco."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        rows = await db.execute_fetchall(
+            "SELECT agent_name, content, status, turn FROM messages WHERE conversation_id = ? ORDER BY turn;",
+            (conversation_id,)
+        )
+        return [{"author": r[0], "content": r[1], "status": r[2], "turn": r[3]} for r in rows]
+
 @app.websocket("/ws/debate")
 async def debate_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -835,7 +844,7 @@ async def debate_websocket(websocket: WebSocket):
                 await CortexDB.update_topic_memory(topic, consensus)
 
                 # Salva transcript do debate
-                transcript = await self._get_transcript(conv_id)
+                transcript = await _get_transcript(conv_id)
                 await SessionFiles.save_debate(session_dir, debate_count, topic, transcript, summary=None)
 
                 if datetime.now() + timedelta(minutes=10) < end_time and not shutdown_manager.should_exit:
