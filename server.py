@@ -68,6 +68,7 @@ class AutonomousSessionRequest(BaseModel):
 # =====================================================================
 
 async def discover_best_model() -> str:
+    """Consulta Ollama e retorna o modelo recomendado (qwen2.5:7b ou menor)."""
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
@@ -75,9 +76,20 @@ async def discover_best_model() -> str:
             models = resp.json().get("models", [])
             if not models:
                 return DEFAULT_MODEL
-            best = max(models, key=lambda m: m.get("size", 0))["name"]
-            logger.info(f"Modelo auto-descoberto: {best}")
-            return best
+
+            # Prioriza qwen2.5:7b se disponivel
+            for m in models:
+                name = m.get("name", "")
+                if "qwen2.5:7b" in name or name == "qwen2.5:7b":
+                    logger.info(f"Modelo encontrado: {name}")
+                    return name
+
+            # Se nao tem 7b, pega o menor disponivel
+            smallest = min(models, key=lambda m: m.get("size", 0))
+            name = smallest["name"]
+            logger.info(f"Modelo fallback (menor): {name}")
+            return name
+
     except Exception as e:
         logger.warning(f"Falha ao descobrir modelos: {e}. Usando default: {DEFAULT_MODEL}")
         return DEFAULT_MODEL
