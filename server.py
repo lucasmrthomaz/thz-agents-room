@@ -907,7 +907,9 @@ def create_agents(model: str) -> list:
             "system_prompt": (
                 f"{prompt}\n\n"
                 "DIRETIVAS OBRIGATORIAS:\n"
-                "- Idioma: Responda EXCLUSIVAMENTE em Portugues do Brasil (pt-BR). NUNCA use chines, arabe ou outros idiomas.\n"
+                "- Idioma: Responda EXCLUSIVAMENTE em Portugues do Brasil (pt-BR).\n"
+                "  PROIBIDO: chines, japones, arabe, coreano, russo, ou qualquer idioma que nao seja portugues.\n"
+                "  Se voce gerar texto em outro idioma, o debate sera ENCERRADO IMEDIATAMENTE.\n"
                 "- Formato: Responda estritamente no esquema JSON com 'argument' e 'status'.\n"
                 "- PLAGIO ABSOLUTAMENTE PROIBIDO: NAO copie, NAO repita, NAO parafraseie trechos de outros agentes.\n"
                 "  Se voce copiar, o debate sera encerrado imediatamente.\n"
@@ -1176,6 +1178,43 @@ class MultiAgentEngine:
                         resp.raise_for_status()
                         raw_json = resp.json()["message"]["content"]
                         decision = AgentDecision(**json.loads(raw_json))
+
+                        # Retry se texto nao for portugues (max 1 tentativa)
+                        if not _is_valid_portuguese(decision.argument):
+                            logger.warning(f"[LANGUAGE] Turno {current_turn} ({agent.name}): texto nao-portugues, retry...")
+                            retry_prompt = (
+                                f"{user_prompt}\n\n"
+                                "!!! ATENCAO: Sua ultima resposta foi em CHINES ou outro idioma invalido. !!!\n"
+                                "!!! RESPONDA APENAS EM PORTUGUES DO BRASIL! !!!\n"
+                                "!!! NAO USE CARACTERES CHINESES, JAPONESES, OU ARABES! !!!"
+                            )
+                            retry_payload = {
+                                "model": agent.model,
+                                "messages": [
+                                    {"role": "system", "content": agent.system_prompt + "\n\n!!! RESPONDA APENAS EM PORTUGUES! NUNCA USE CHINES! !!!"},
+                                    {"role": "user", "content": retry_prompt}
+                                ],
+                                "stream": False,
+                                "format": AgentDecision.model_json_schema(),
+                                "options": {
+                                    "temperature": 0.3,
+                                    "repeat_penalty": 1.15,
+                                    "num_ctx": self.num_ctx
+                                }
+                            }
+                            try:
+                                retry_resp = await http_client.post(OLLAMA_CHAT_URL, json=retry_payload, timeout=180.0)
+                                retry_resp.raise_for_status()
+                                retry_json = retry_resp.json()["message"]["content"]
+                                retry_decision = AgentDecision(**json.loads(retry_json))
+                                if _is_valid_portuguese(retry_decision.argument):
+                                    decision = retry_decision
+                                    logger.info(f"[LANGUAGE] Turno {current_turn} ({agent.name}): retry bem-sucedido")
+                                else:
+                                    logger.warning(f"[LANGUAGE] Turno {current_turn} ({agent.name}): retry tambem falhou")
+                            except Exception as retry_e:
+                                logger.error(f"[LANGUAGE] Turno {current_turn} ({agent.name}): erro no retry: {retry_e}")
+
                     except Exception as e:
                         logger.error(f"Erro turno {current_turn} ({agent.name}): {e}")
                         decision = AgentDecision(
