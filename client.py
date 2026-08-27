@@ -182,7 +182,7 @@ async def _run_session(payload: dict):
                         role = data.get('role', '?')
                         turn = data.get('turn', '?')
                         color = _agent_color(agent)
-                        print(f"\n  {_c(ICON_BRAIN, color)} {_c(agent, BOLD + color)}  {_c(f'({role})', DIM)}  {_c(f'Turno {turn}', DIM)}...", flush=True)
+                        print(f"\n  {_c(f'Turno {turn}', DIM)} — {_c(agent, BOLD + color)}...", flush=True)
 
                     elif evt == "turn_end":
                         agent = data.get('agent', '?')
@@ -245,7 +245,7 @@ def main():
     parser.add_argument("--topic", "-t", type=str, help="Topico para debate (modo single)")
     parser.add_argument("--autonomous", "-a", action="store_true", help="Modo autonomo (sessao noturna)")
     parser.add_argument("--hours", type=float, default=8.0, help="Duracao em horas (default: 8)")
-    parser.add_argument("--turns", type=int, default=18, help="Max turnos por debate (default: 18)")
+    parser.add_argument("--turns", type=int, default=48, help="Max turnos por debate (default: 48)")
     parser.add_argument("--ctx", type=int, default=8192, help="Contexto do modelo (default: 8192)")
     parser.add_argument("--model", "-m", type=str, default=None, help="Modelo Ollama (default: auto-discovery)")
 

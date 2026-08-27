@@ -18,7 +18,7 @@ GRAY='\033[0;37m'
 NC='\033[0m' # No Color
 
 # Defaults
-TURNS=18
+TURNS=48
 CTX=8192
 MODEL=""
 
@@ -53,6 +53,14 @@ start_server() {
     echo -e "${GRAY}  [SERVER] Ctrl+C para parar${NC}"
     echo ""
     python3 server.py
+}
+
+start_gui() {
+    banner
+    echo -e "${GREEN}  [GUI] Iniciando interface grafica...${NC}"
+    echo -e "${GRAY}  [GUI] Servidor inicia automaticamente${NC}"
+    echo ""
+    python3 main.py
 }
 
 start_client() {
@@ -110,6 +118,9 @@ done
 
 # === MAIN ===
 case "$ACTION" in
+    gui)
+        start_gui
+        ;;
     server)
         start_server
         ;;
@@ -123,23 +134,8 @@ case "$ACTION" in
         show_help
         ;;
     "")
-        # Menu interativo
-        banner
-        echo -e "${YELLOW}  Escolha o modo:${NC}"
-        echo "    1 - Servidor (inicia o backend)"
-        echo "    2 - Cliente (debate sob demanda)"
-        echo "    3 - Autonomo (sessao de debates)"
-        echo "    0 - Sair"
-        echo ""
-        read -p "  Opcao: " choice
-
-        case $choice in
-            1) start_server ;;
-            2) start_client "" ;;
-            3) start_autonomous "" ;;
-            0) echo -e "${CYAN}  Adeus!${NC}" ;;
-            *) echo -e "${RED}  Opcao invalida.${NC}" ;;
-        esac
+        # Modo padrao: inicia GUI
+        start_gui
         ;;
     *)
         echo -e "${RED}  Comando invalido: $ACTION${NC}"

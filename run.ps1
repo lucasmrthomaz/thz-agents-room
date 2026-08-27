@@ -2,20 +2,21 @@
 #
 # Uso:
 #   .\run.ps1                           Menu interativo
+#   .\run.ps1 gui                       Interface grafica (default)
 #   .\run.ps1 server                    Inicia o servidor
 #   .\run.ps1 client "topico"           Debate sob demanda
 #   .\run.ps1 autonomous [horas]        Sessao autonoma (default 8h)
 
 param(
     [Parameter(Position=0)]
-    [ValidateSet("server", "client", "autonomous", "help", "")]
+    [ValidateSet("gui", "server", "client", "autonomous", "help", "")]
     [string]$Action = "",
 
     [Parameter(Position=1)]
     [string]$Arg1 = "",
 
     [string]$Model = "",
-    [int]$Turns = 18,
+    [int]$Turns = 48,
     [int]$Ctx = 8192
 )
 
@@ -57,6 +58,14 @@ function Start-Server {
     Write-Host "  [SERVER] Ctrl+C para parar" -ForegroundColor Gray
     Write-Host ""
     python server.py
+}
+
+function Start-GUI {
+    Show-Banner
+    Write-Host "  [GUI] Iniciando interface grafica..." -ForegroundColor Green
+    Write-Host "  [GUI] Servidor inicia automaticamente" -ForegroundColor Gray
+    Write-Host ""
+    python main.py
 }
 
 function Start-Client {
@@ -109,6 +118,7 @@ function Start-Autonomous {
 # === MAIN ===
 
 switch ($Action) {
+    "gui"        { Start-GUI }
     "server"     { Start-Server }
     "client"     { Start-Client -Topic $Arg1 }
     "autonomous" {
@@ -117,23 +127,7 @@ switch ($Action) {
     }
     "help"       { Show-Help }
     ""           {
-        # Menu interativo
-        Show-Banner
-        Write-Host "  Escolha o modo:" -ForegroundColor Yellow
-        Write-Host "    1 - Servidor (inicia o backend)"
-        Write-Host "    2 - Cliente (debate sob demanda)"
-        Write-Host "    3 - Autonomo (sessao de debates)"
-        Write-Host "    0 - Sair"
-        Write-Host ""
-
-        $choice = Read-Host "  Opcao"
-
-        switch ($choice) {
-            "1" { Start-Server }
-            "2" { Start-Client -Topic "" }
-            "3" { Start-Autonomous -Hours 0 }
-            "0" { Write-Host "  Adeus!" -ForegroundColor Cyan }
-            default { Write-Host "  Opcao invalida." -ForegroundColor Red }
-        }
+        # Modo padrao: inicia GUI
+        Start-GUI
     }
 }

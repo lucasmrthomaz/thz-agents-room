@@ -36,14 +36,14 @@ class TestClient:
 
         with patch('client.websockets.connect', return_value=mock_ws):
             try:
-                await run_single("Teste Kafka", 18, 8192, "qwen2.5:7b")
+                await run_single("Teste Kafka", 48, 8192, "qwen2.5:7b")
             except Exception:
                 pass
 
             payload = json.loads(mock_ws.send.call_args[0][0])
             assert payload["mode"] == "single"
             assert payload["topic"] == "Teste Kafka"
-            assert payload["max_turns"] == 18
+            assert payload["max_turns"] == 48
             assert payload["num_ctx"] == 8192
             assert payload["model"] == "qwen2.5:7b"
 

@@ -62,7 +62,7 @@ class TestSingleDebateRequest:
         )
         assert req.mode == "single"
         assert req.topic == "Teste de topic"
-        assert req.max_turns == 18  # default
+        assert req.max_turns == 48  # default
         assert req.num_ctx == 8192  # default
         assert req.model is None  # default
 
