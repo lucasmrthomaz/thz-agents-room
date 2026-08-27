@@ -99,6 +99,7 @@ class SingleDebateRequest(BaseModel):
 class AutonomousSessionRequest(BaseModel):
     mode: Literal["autonomous"] = "autonomous"
     duration_hours: float = Field(default=8.0, ge=0.5, le=24.0)
+    max_turns: int = Field(default=48, ge=6, le=50)
     num_ctx: int = Field(default=8192, ge=4096, le=32768)
     model: Optional[str] = None
 
