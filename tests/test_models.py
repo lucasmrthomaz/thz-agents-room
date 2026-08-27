@@ -28,6 +28,15 @@ class TestAgentDecision:
         )
         assert decision.status == "CONSENSUS"
 
+    def test_valid_force_stop(self):
+        """Testa criacao de decisao FORCE_STOP valida."""
+        from server import AgentDecision
+        decision = AgentDecision(
+            argument="Sistema detectou problema.",
+            status="FORCE_STOP"
+        )
+        assert decision.status == "FORCE_STOP"
+
     def test_invalid_status(self):
         """Testa que status invalido gera erro."""
         from server import AgentDecision

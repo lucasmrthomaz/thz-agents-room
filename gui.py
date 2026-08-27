@@ -43,6 +43,7 @@ STATUS_COLORS = {
     "CONTINUE": "#f9e2af",
     "CONSENSUS": "#a6e3a1",
     "STOP": "#f38ba8",
+    "FORCE_STOP": "#f38ba8",
 }
 
 # Animacao de loading

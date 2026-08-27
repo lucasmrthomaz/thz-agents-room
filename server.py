@@ -91,8 +91,8 @@ class AgentDecision(BaseModel):
     argument: str = Field(
         description="Argumento tecnico detalhado em Portugues do Brasil (pt-BR)."
     )
-    status: Literal["CONTINUE", "CONSENSUS"] = Field(
-        description="CONTINUE para manter a discusao; CONSENSUS apenas em caso de acordo total."
+    status: Literal["CONTINUE", "CONSENSUS", "FORCE_STOP"] = Field(
+        description="CONTINUE para manter a discusao; CONSENSUS apenas em caso de acordo total; FORCE_STOP quando o sistema forca parada."
     )
 
 class SingleDebateRequest(BaseModel):
@@ -150,6 +150,32 @@ async def resolve_model(requested: Optional[str]) -> str:
         return env_model
     return await discover_best_model()
 
+
+async def _migrate_db(db):
+    """Migra banco de dados existente, adicionando colunas novas."""
+    # Obter colunas existentes
+    async with db.execute("PRAGMA table_info(conversations)") as cursor:
+        conv_cols = {row[1] for row in await cursor.fetchall()}
+
+    async with db.execute("PRAGMA table_info(messages)") as cursor:
+        msg_cols = {row[1] for row in await cursor.fetchall()}
+
+    # Adicionar colunas novas em conversations
+    if "summary_short" not in conv_cols:
+        await db.execute("ALTER TABLE conversations ADD COLUMN summary_short TEXT;")
+        logger.info("[MIGRATE] Adicionado summary_short em conversations")
+
+    if "summary_full" not in conv_cols:
+        await db.execute("ALTER TABLE conversations ADD COLUMN summary_full TEXT;")
+        logger.info("[MIGRATE] Adicionado summary_full em conversations")
+
+    # Adicionar coluna nova em messages
+    if "idempotency_key" not in msg_cols:
+        await db.execute("ALTER TABLE messages ADD COLUMN idempotency_key TEXT;")
+        logger.info("[MIGRATE] Adicionado idempotency_key em messages")
+
+    await db.commit()
+
 # =====================================================================
 # 3. PERSISTENCIA - thz-room-cortex.db
 # =====================================================================
@@ -188,6 +214,9 @@ class CortexDB:
                     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
                 );
             """)
+
+            # Migracao: adicionar colunas novas em bancos existentes
+            await _migrate_db(db)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS topic_memory (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1162,23 +1191,23 @@ class MultiAgentEngine:
                     if len(history) >= 3:
                         recent_args = [h["content"] for h in history[-5:]] if len(history) >= 5 else [h["content"] for h in history[-3:]]
                         if _is_repetitive(recent_args):
-                            effective_status = "CONSENSUS"
+                            effective_status = "FORCE_STOP"
                             logger.info(f"[REPETITION] Turno {current_turn}: espiral de repeticao detectada")
 
                     # Deteccao de plagio
                     if len(history) >= 1 and _is_plagiarized(decision.argument, history):
-                        effective_status = "CONSENSUS"
+                        effective_status = "FORCE_STOP"
                         logger.info(f"[PLAGIARISM] Turno {current_turn}: trechos copiados detectados")
 
                     # Validacao de idioma (rejeitar chines, arabe, etc)
                     if not _is_valid_portuguese(decision.argument):
-                        effective_status = "CONSENSUS"
+                        effective_status = "FORCE_STOP"
                         logger.info(f"[LANGUAGE] Turno {current_turn}: texto nao-portugues detectado")
 
                     # Health monitoring (loop detector)
                     health = self.loop_detector.analyze_debate_health(history)
                     if self.loop_detector.should_end_debate(health, current_turn, self.min_turns):
-                        effective_status = "CONSENSUS"
+                        effective_status = "FORCE_STOP"
                         logger.info(f"[HEALTH] Turno {current_turn}: {health['recommendation']} (diversity={health['diversity_score']:.2f})")
 
                     # Quality monitoring
@@ -1207,6 +1236,25 @@ class MultiAgentEngine:
                     if effective_status == "CONSENSUS":
                         consecutive_consensus += 1
                         last_consensus = True
+                    elif effective_status == "FORCE_STOP":
+                        # FORCE_STOP: sistema forcou parada, encerrar debate
+                        logger.info(f"[FORCE_STOP] Turno {current_turn}: debate encerrado por sistema")
+                        summary_short = await generate_debate_summary(
+                            self.agents[0].model, topic, history, False
+                        )
+                        summary_full = await generate_full_summary(
+                            self.agents[0].model, topic, history, summary_short, False
+                        )
+                        await websocket.send_json({
+                            "event": "debate_complete",
+                            "data": {
+                                "reason": "force_stop",
+                                "total_turns": current_turn,
+                                "summary": summary_short,
+                                "summary_full": summary_full
+                            }
+                        })
+                        return False, summary_short, summary_full
                     else:
                         consecutive_consensus = 0
                         last_consensus = False

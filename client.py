@@ -66,6 +66,7 @@ STATUS_COLORS = {
     "CONTINUE":   YELLOW,
     "CONSENSUS":  GREEN,
     "STOP":       RED,
+    "FORCE_STOP": RED,
 }
 
 # Loading frames
