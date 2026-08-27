@@ -976,6 +976,7 @@ class THZMainsApp:
     def _run_teamwork_pipeline(self, mode: str, goal: str, model: str):
         """Executa a pipeline de Teamwork via streaming SSE e atualiza a interface em tempo real."""
         def worker():
+            self.root.after(0, self._close_file_viewer)
             self.root.after(0, lambda: self._start_loading(f"Iniciando TeamWork ({mode})..."))
             self.root.after(0, lambda: self._append_text(f"\n{'='*70}\n", "separator"))
             self.root.after(0, lambda: self._append_text(f"  🚀 SESSÃO DE TEAMWORK INICIADA ({mode.upper()})\n", "header_green"))
@@ -1028,43 +1029,47 @@ class THZMainsApp:
                                 self._append_text(f"\n  ⏳ [{r}] Iniciando análise e elaborando arquivos...\n", "dim")
                             self.root.after(0, on_step_start)
 
-                        elif status == "completed":
+                        elif status == "completed" and evt.get("stage") not in ["completed", "COMPLETED"]:
                             role = evt.get("role", "Especialista")
                             role_title = step_data.get("role_title", role)
                             stage = evt.get("stage", "")
                             contrib = step_data.get("contribution", "")
                             files = step_data.get("files", [])
-                            step_num = step_data.get("step_number", 1)
+                            step_num = step_data.get("step_number")
                             total = step_data.get("total_steps", 6 if mode == "content" else 7)
 
-                            def on_step_done(r_title=role_title, st=stage, c=contrib, fls=files, s_n=step_num, tot=total):
-                                self._append_text(f"\n  👤 {r_title} [{st}] (Etapa {s_n}/{tot}):\n", "header_blue")
-                                self._append_text(f"  {c}\n", "argument")
-                                if fls:
-                                    self._append_text(f"  📁 Arquivos gerados:\n", "dim")
-                                    for f in fls:
-                                        self._append_text(f"     - {f}\n", "header_green")
-                                self._append_text(f"  {'─'*70}\n", "separator")
-                                pct = int((s_n / tot) * 100)
-                                self.progress_label.config(text=f"Etapa {s_n}/{tot} ({pct}%)")
-                                self._set_status(f"Etapa {s_n}/{tot} concluída por {r_title}", ACCENT_GREEN)
-                                self._load_projects_history()
+                            if step_num is not None:
+                                def on_step_done(r_title=role_title, st=stage, c=contrib, fls=files, s_n=step_num, tot=total):
+                                    self._append_text(f"\n  👤 {r_title} [{st}] (Etapa {s_n}/{tot}):\n", "header_blue")
+                                    self._append_text(f"  {c}\n", "argument")
+                                    if fls:
+                                        self._append_text(f"  📁 Arquivos gerados:\n", "dim")
+                                        for f in fls:
+                                            self._append_text(f"     - {f}\n", "header_green")
+                                    self._append_text(f"  {'─'*70}\n", "separator")
+                                    pct = int((s_n / tot) * 100)
+                                    self.progress_label.config(text=f"Etapa {s_n}/{tot} ({pct}%)")
+                                    self._set_status(f"Etapa {s_n}/{tot} concluída por {r_title}", ACCENT_GREEN)
+                                    self._load_projects_history()
 
-                            self.root.after(0, on_step_done)
+                                self.root.after(0, on_step_done)
 
-                        elif evt_type == "teamwork_complete":
-                            res = evt.get("result", {})
+                        elif status == "pipeline_finished" or evt.get("stage") in ["completed", "COMPLETED"] or evt_type == "teamwork_complete":
+                            total = 6 if mode == "content" else 7
+                            res = evt.get("result") or {}
                             out_dir = res.get("output_directory", "")
-                            summary = res.get("executive_summary", "")
+                            summary = res.get("executive_summary") or step_data.get("contribution") or msg
 
-                            def on_finish(o=out_dir, sm=summary):
+                            def on_finish(o=out_dir, sm=summary, tot=total):
                                 self._stop_loading()
+                                self.progress_label.config(text=f"Concluído {tot}/{tot} (100%)")
                                 self._append_text(f"\n{'='*70}\n", "separator")
-                                self._append_text(f"  ✅ TEAMWORK CONCLUÍDO COM SUCESSO!\n", "header_green")
+                                self._append_text(f"  ✅ TEAMWORK CONCLUÍDO COM SUCESSO! ({tot}/{tot} Etapas)\n", "header_green")
                                 self._append_text(f"  {sm}\n\n", "argument")
-                                self._append_text(f"  📦 Arquivos salvos em: {o}\n", "title")
+                                if o:
+                                    self._append_text(f"  📦 Arquivos salvos em: {o}\n", "title")
                                 self._append_text(f"{'='*70}\n\n", "separator")
-                                self._set_status("Teamwork finalizado com sucesso!", ACCENT_GREEN)
+                                self._set_status(f"Teamwork finalizado com sucesso! ({tot}/{tot} etapas)", ACCENT_GREEN)
                                 self.running = False
                                 self.start_btn.config(state=tk.NORMAL)
                                 self.stop_btn.config(state=tk.DISABLED)

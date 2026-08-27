@@ -247,7 +247,15 @@ class ContentPipeline:
             f"Salvo em: {output_path}"
         )
 
-        await _notify(TeamworkStage.COMPLETED, "Editorial Board", "completed", final_summary)
+        await _notify(
+            TeamworkStage.COMPLETED, "Editorial Board", "pipeline_finished", final_summary,
+            step_data={
+                "step_number": 6,
+                "total_steps": 6,
+                "role_title": "Editorial Board",
+                "contribution": final_summary
+            }
+        )
 
         return TeamworkSessionResult(
             session_id=session_id,

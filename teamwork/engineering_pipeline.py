@@ -351,7 +351,15 @@ class EngineeringPipeline:
             f"Arquivos salvos em: {output_path}"
         )
 
-        await _notify(TeamworkStage.COMPLETED, "Orchestrator", "completed", final_summary)
+        await _notify(
+            TeamworkStage.COMPLETED, "Orchestrator", "pipeline_finished", final_summary,
+            step_data={
+                "step_number": 7,
+                "total_steps": 7,
+                "role_title": "Orchestrator",
+                "contribution": final_summary
+            }
+        )
 
         return TeamworkSessionResult(
             session_id=session_id,
