@@ -431,6 +431,7 @@ class THZMainsApp:
         elif evt == "turn_end":
             self._stop_loading()
             agent = data.get("agent", "?")
+            turn = data.get("turn", self.current_turn)
             arg = data.get("argument", "Sem conteudo.")
             status = data.get("status", "?")
             tag = f"agent_{agent}" if agent in AGENT_COLORS else "argument"
