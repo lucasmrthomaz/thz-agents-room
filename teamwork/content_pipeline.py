@@ -183,27 +183,33 @@ class ContentPipeline:
                 "- Formate TODOS os arquivos gerados com os marcadores '### FILE: caminho/do/arquivo.ext' e feche os blocos de código com '```'."
             )
 
-            payload = {
-                "model": model_to_use,
-                "messages": [
-                    {"role": "system", "content": f"Você é o {title} na redação técnica da comunidade de desenvolvedores. Você sempre entrega artigos e arquivos 100% completos e funcionais."},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "stream": False,
-                "options": {
-                    "temperature": 0.5,
-                    "num_ctx": request.num_ctx,
-                    "num_predict": 4096
-                }
+            messages = [
+                {"role": "system", "content": f"Você é o {title} na redação técnica da comunidade de desenvolvedores. Você sempre entrega artigos e arquivos 100% completos e funcionais."},
+                {"role": "user", "content": user_prompt}
+            ]
+            options = {
+                "temperature": 0.5,
+                "num_ctx": request.num_ctx,
+                "num_predict": 4096
             }
 
+            from stability.model_selector import get_model_selector
+            selector = get_model_selector()
+
+            async def on_degrade(event_dict):
+                await _notify(stage, role.value, "model_fallback", event_dict.get("message", "Abaixando a régua do modelo..."), step_data=event_dict)
+
             try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=300.0)
-                    resp.raise_for_status()
-                    agent_output = resp.json()["message"]["content"].strip()
+                agent_output, effective_model, latency = await selector.infer_with_adaptive_fallback(
+                    messages=messages,
+                    options=options,
+                    preferred_model=model_to_use,
+                    step_timeout_sec=120.0,
+                    progress_callback=on_degrade
+                )
+                logger.info(f"[TEAMWORK-CONTENT] Etapa {step_num} executada com '{effective_model}' em {latency:.2f}s.")
             except Exception as e:
-                logger.error(f"[TEAMWORK-CONTENT] Erro na etapa {stage.value} ({role.value}): {e}")
+                logger.error(f"[TEAMWORK-CONTENT] Erro irrecuperável na etapa {stage.value} ({role.value}): {e}")
                 agent_output = f"Erro na inferência da etapa {stage.value}: {e}"
 
             extracted_files = WorkspaceManager.extract_artifacts_from_text(agent_output, author_role=role.value)

@@ -951,6 +951,12 @@ class THZMainsApp:
                         if status == "started":
                             self.root.after(0, lambda m=msg: self._set_status(m, ACCENT_CYAN))
 
+                        elif status == "model_fallback":
+                            def on_fallback(m=msg):
+                                self._append_text(f"\n  ⚡ [CIRCUIT BREAKER] {m}\n", "header_yellow")
+                                self._set_status(m, ACCENT_YELLOW)
+                            self.root.after(0, on_fallback)
+
                         elif status == "running":
                             role = evt.get("role", "")
                             def on_step_start(r=role, m=msg):
