@@ -307,6 +307,119 @@ class CortexDB:
                 skills[name].append({"domain": domain, "level": level})
             return skills
 
+    @staticmethod
+    async def get_recent_debates(limit: int = 20) -> List[Dict]:
+        """Retorna os debates mais recentes com status e total de turnos."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            rows = await db.execute_fetchall("""
+                SELECT
+                    c.id,
+                    c.topic,
+                    c.created_at,
+                    COUNT(m.id) as total_turns,
+                    MAX(m.status) as last_status
+                FROM conversations c
+                LEFT JOIN messages m ON m.conversation_id = c.id
+                GROUP BY c.id
+                ORDER BY c.created_at DESC
+                LIMIT ?;
+            """, (limit,))
+            return [
+                {
+                    "id": r[0],
+                    "topic": r[1],
+                    "created_at": r[2],
+                    "total_turns": r[3] or 0,
+                    "last_status": r[4] or "N/A"
+                }
+                for r in rows
+            ]
+
+    @staticmethod
+    async def get_debate_messages(conversation_id: str) -> List[Dict]:
+        """Retorna todas as mensagens de um debate."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            rows = await db.execute_fetchall("""
+                SELECT agent_name, content, status, turn
+                FROM messages
+                WHERE conversation_id = ?
+                ORDER BY turn;
+            """, (conversation_id,))
+            return [
+                {"agent": r[0], "content": r[1], "status": r[2], "turn": r[3]}
+                for r in rows
+            ]
+
+    @staticmethod
+    async def retrieve_knowledge(topic: str, limit: int = 5) -> List[Dict]:
+        """Busca conhecimento relevante de debates anteriores sobre o topico.
+        Retorna os argumentos mais relevantes de debates passados."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Busca debates com topicos similares (LIKE)
+            topic_words = topic.split()
+            like_conditions = " OR ".join(["c.topic LIKE ?" for _ in topic_words])
+            like_params = [f"%{w}%" for w in topic_words]
+
+            rows = await db.execute_fetchall(f"""
+                SELECT DISTINCT
+                    m.agent_name,
+                    m.content,
+                    m.status,
+                    c.topic,
+                    c.created_at
+                FROM messages m
+                JOIN conversations c ON c.id = m.conversation_id
+                WHERE ({like_conditions})
+                AND m.status = 'CONSENSUS'
+                ORDER BY c.created_at DESC
+                LIMIT ?;
+            """, (*like_params, limit))
+            return [
+                {
+                    "agent": r[0],
+                    "content": r[1],
+                    "status": r[2],
+                    "topic": r[3],
+                    "created_at": r[4]
+                }
+                for r in rows
+            ]
+
+    @staticmethod
+    async def get_topic_history(topic: str) -> Dict:
+        """Retorna historico de um topico especifico."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            rows = await db.execute_fetchall("""
+                SELECT times_discussed, last_consensus, last_discussed_at
+                FROM topic_memory
+                WHERE topic = ?;
+            """, (topic,))
+            if rows:
+                r = rows[0]
+                return {
+                    "times_discussed": r[0],
+                    "last_consensus": r[1],
+                    "last_discussed_at": r[2]
+                }
+            return None
+
+    @staticmethod
+    async def get_agent_contributions() -> Dict[str, Dict]:
+        """Retorna contribuicoes de cada agente em debates anteriores."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            rows = await db.execute_fetchall("""
+                SELECT
+                    agent_name,
+                    COUNT(*) as total_messages,
+                    SUM(CASE WHEN status = 'CONSENSUS' THEN 1 ELSE 0 END) as consensus_count
+                FROM messages
+                GROUP BY agent_name;
+            """)
+            return {
+                r[0]: {"total": r[1], "consensus": r[2] or 0}
+                for r in rows
+            }
+
 # =====================================================================
 # 4. SESSAO - ARQUIVOS JSON
 # =====================================================================
@@ -641,6 +754,24 @@ class MultiAgentEngine:
         consecutive_consensus = 0
         last_consensus = False
 
+        # Recuperar conhecimento relevante de debates anteriores
+        prior_knowledge = await CortexDB.retrieve_knowledge(topic, limit=3)
+        topic_history = await CortexDB.get_topic_history(topic)
+
+        # Construir contexto de conhecimento previo
+        knowledge_context = ""
+        if prior_knowledge:
+            knowledge_context = "\n\n## Conhecimento de Debates Anteriores:\n"
+            for k in prior_knowledge:
+                knowledge_context += f"- [{k['agent']}] sobre '{k['topic']}': {k['content'][:200]}...\n"
+            knowledge_context += "\nUse esse conhecimento como base, mas nao repita os mesmos argumentos. Traga novas perspectivas.\n"
+
+        if topic_history:
+            knowledge_context += f"\n## Historico deste topico:\n"
+            knowledge_context += f"- Discutido {topic_history['times_discussed']} vez(es) anteriormente\n"
+            knowledge_context += f"- Ultimo resultado: {'Consenso' if topic_history['last_consensus'] else 'Sem consenso'}\n"
+            knowledge_context += f"- Ultima discussao: {topic_history['last_discussed_at']}\n"
+
         async with httpx.AsyncClient() as http_client:
             while current_turn < self.max_turns:
                 for agent in self.agents:
@@ -654,7 +785,11 @@ class MultiAgentEngine:
                     transcript = [f"[{h['author']} - Turno {h['turn']}]: {h['content']}" for h in history]
 
                     if current_turn == 1:
-                        instruction = "Voce abre o debate. Apresente sua tese tecnica inicial sobre o problema."
+                        instruction = (
+                            "Voce abre o debate. Apresente sua tese tecnica inicial sobre o problema. "
+                            "Se houver conhecimento previo relevante, use-o como ponto de partida, "
+                            "mas traga novas perspectivas e dados atualizados."
+                        )
                     else:
                         instruction = (
                             "Analise o argumento do turno anterior e responda de forma critica, "
@@ -849,8 +984,12 @@ async def debate_websocket(websocket: WebSocket):
                 await SessionFiles.save_debate(session_dir, debate_count, topic, transcript, summary=None)
 
                 if datetime.now() + timedelta(minutes=10) < end_time and not shutdown_manager.should_exit:
-                    logger.info(f"[PAUSA] 10 minutos antes do proximo debate...")
-                    await asyncio.sleep(600)
+                    logger.info(f"[PAUSA] 1 minuto antes do proximo debate...")
+                    await websocket.send_json({
+                        "event": "debate_paused",
+                        "data": {"duration_seconds": 60, "next_debate": debate_count + 1}
+                    })
+                    await asyncio.sleep(60)
 
             # Limpa shutdown manager
             shutdown_manager.current_session = None

@@ -208,16 +208,69 @@ class THZMainsApp:
         )
         self.loading_frame_label.pack(fill=tk.X, padx=15, pady=(0, 2))
 
-        # Area de debate
-        debate_frame = ttk.Frame(self.root)
-        debate_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 5))
+        # Area principal com PanedWindow (sidebar + debate)
+        main_pane = tk.PanedWindow(
+            self.root, orient=tk.HORIZONTAL, bg=BG_DARK,
+            sashwidth=4, sashrelief=tk.FLAT, borderwidth=0
+        )
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 5))
+
+        # === SIDEBAR ===
+        sidebar_frame = tk.Frame(main_pane, bg=BG_DARK, width=250)
+        main_pane.add(sidebar_frame, minsize=200, width=250)
+
+        # Header da sidebar
+        sidebar_header = tk.Frame(sidebar_frame, bg=BG_DARK)
+        sidebar_header.pack(fill=tk.X, padx=5, pady=(5, 10))
+
+        tk.Label(
+            sidebar_header, text="📋 Debates Recentes", fg=ACCENT_CYAN, bg=BG_DARK,
+            font=("Segoe UI", 11, "bold")
+        ).pack(side=tk.LEFT)
+
+        self.refresh_btn = tk.Button(
+            sidebar_header, text="↻", fg=ACCENT_CYAN, bg=BG_DARK,
+            font=("Segoe UI", 12, "bold"), relief=tk.FLAT, bd=0,
+            command=self._load_debate_history, cursor="hand2"
+        )
+        self.refresh_btn.pack(side=tk.RIGHT)
+
+        # Lista de debates (scrollavel)
+        sidebar_list_frame = tk.Frame(sidebar_frame, bg=BG_MID, relief=tk.FLAT)
+        sidebar_list_frame.pack(fill=tk.BOTH, expand=True, padx=2)
+
+        self.sidebar_canvas = tk.Canvas(
+            sidebar_list_frame, bg=BG_MID, highlightthickness=0, bd=0
+        )
+        self.sidebar_scrollbar = tk.Scrollbar(
+            sidebar_list_frame, orient=tk.VERTICAL, command=self.sidebar_canvas.yview
+        )
+        self.sidebar_inner = tk.Frame(self.sidebar_canvas, bg=BG_MID)
+
+        self.sidebar_inner.bind("<Configure>", lambda e: self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all")))
+        self.sidebar_canvas.create_window((0, 0), window=self.sidebar_inner, anchor=tk.NW)
+        self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
+
+        self.sidebar_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.sidebar_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Bind mousewheel
+        self.sidebar_canvas.bind("<MouseWheel>", lambda e: self.sidebar_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+
+        # Armazena referencias dos widgets de debate
+        self.debate_entries = []
+        self.debate_ids = []
+
+        # === AREA DE DEBATE ===
+        debate_frame = tk.Frame(main_pane, bg=BG_MID)
+        main_pane.add(debate_frame, minsize=400)
 
         self.debate_text = scrolledtext.ScrolledText(
             debate_frame, wrap=tk.WORD, font=("Consolas", 10),
             bg=BG_MID, fg=FG_PRIMARY, insertbackground=FG_PRIMARY,
             relief=tk.FLAT, highlightthickness=0, state=tk.DISABLED
         )
-        self.debate_text.pack(fill=tk.BOTH, expand=True)
+        self.debate_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
         # Tags de cores
         self.debate_text.tag_configure("title", foreground=ACCENT_CYAN, font=("Consolas", 11, "bold"))
@@ -260,6 +313,152 @@ class THZMainsApp:
         else:
             self.hours_entry.config(state=tk.DISABLED)
             self.topic_entry.config(state=tk.NORMAL)
+
+    def _load_debate_history(self):
+        """Carrega historico de debates do banco em background."""
+        def load():
+            import asyncio as _asyncio
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            try:
+                from server import CortexDB
+                debates = loop.run_until_complete(CortexDB.get_recent_debates(20))
+                self.root.after(0, self._render_debate_history, debates)
+            except Exception as e:
+                self.root.after(0, lambda: self._append_system(f"Erro ao carregar historico: {e}"))
+            finally:
+                loop.close()
+
+        threading.Thread(target=load, daemon=True).start()
+
+    def _render_debate_history(self, debates):
+        """Renderiza a lista de debates na sidebar."""
+        # Limpar entradas anteriores
+        for widget in self.sidebar_inner.winfo_children():
+            widget.destroy()
+        self.debate_entries.clear()
+        self.debate_ids.clear()
+
+        if not debates:
+            tk.Label(
+                self.sidebar_inner, text="Nenhum debate encontrado", fg=FG_DIM, bg=BG_MID,
+                font=("Segoe UI", 9), wraplength=220
+            ).pack(padx=10, pady=20)
+            return
+
+        for i, debate in enumerate(debates):
+            self._add_debate_entry(debate, i)
+
+    def _add_debate_entry(self, debate, index):
+        """Adiciona uma entrada de debate na sidebar."""
+        topic = debate.get("topic", "Sem topico")
+        created_at = debate.get("created_at", "")
+        total_turns = debate.get("total_turns", 0)
+        last_status = debate.get("last_status", "N/A")
+        conv_id = debate.get("id", "")
+
+        # Formatar data
+        if created_at:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(created_at)
+                date_str = dt.strftime("%d/%m %H:%M")
+            except (ValueError, TypeError):
+                date_str = created_at[:16]
+        else:
+            date_str = "?"
+
+        # Cor do status
+        if last_status == "CONSENSUS":
+            status_color = ACCENT_GREEN
+            status_icon = "✓"
+        elif last_status == "CONTINUE":
+            status_color = ACCENT_YELLOW
+            status_icon = "…"
+        else:
+            status_color = FG_DIM
+            status_icon = "•"
+
+        # Frame da entrada
+        entry_frame = tk.Frame(self.sidebar_inner, bg=BG_MID, cursor="hand2")
+        entry_frame.pack(fill=tk.X, padx=2, pady=1)
+
+        # Topico (truncado)
+        topic_display = topic[:35] + "..." if len(topic) > 35 else topic
+        topic_label = tk.Label(
+            entry_frame, text=f"{status_icon} {topic_display}", fg=FG_PRIMARY, bg=BG_MID,
+            font=("Segoe UI", 9), anchor=tk.W, wraplength=220, justify=tk.LEFT
+        )
+        topic_label.pack(fill=tk.X, padx=8, pady=(4, 0))
+
+        # Info linha
+        info_label = tk.Label(
+            entry_frame, text=f"  {date_str} | {total_turns} turnos", fg=FG_DIM, bg=BG_MID,
+            font=("Segoe UI", 8), anchor=tk.W
+        )
+        info_label.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        # Separador
+        sep = tk.Frame(self.sidebar_inner, bg=BG_LIGHT, height=1)
+        sep.pack(fill=tk.X, padx=8, pady=1)
+
+        # Armazenar referencia
+        self.debate_entries.append(entry_frame)
+        self.debate_ids.append(conv_id)
+
+        # Bind click
+        def on_click(e, cid=conv_id, t=topic):
+            self._show_debate_detail(cid, t)
+
+        for widget in [entry_frame, topic_label, info_label]:
+            widget.bind("<Button-1>", on_click)
+            widget.bind("<Enter>", lambda e, f=entry_frame: f.configure(bg=BG_LIGHT))
+            widget.bind("<Leave>", lambda e, f=entry_frame: f.configure(bg=BG_MID))
+
+    def _show_debate_detail(self, conversation_id, topic):
+        """Mostra detalhes de um debate na area principal."""
+        def load():
+            import asyncio as _asyncio
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            try:
+                from server import CortexDB
+                messages = loop.run_until_complete(CortexDB.get_debate_messages(conversation_id))
+                self.root.after(0, self._render_debate_detail, topic, messages)
+            except Exception as e:
+                self.root.after(0, lambda: self._append_system(f"Erro ao carregar debate: {e}"))
+            finally:
+                loop.close()
+
+        self._set_status(f"Carregando: {topic[:40]}...", ACCENT_BLUE)
+        threading.Thread(target=load, daemon=True).start()
+
+    def _render_debate_detail(self, topic, messages):
+        """Renderiza detalhes de um debate na area de texto."""
+        self.debate_text.config(state=tk.NORMAL)
+        self.debate_text.delete("1.0", tk.END)
+
+        self._append_text(f"\n{'='*70}\n", "separator")
+        self._append_text(f"  DEBATE: {topic}\n", "title")
+        self._append_text(f"  Total de turnos: {len(messages)}\n", "dim")
+        self._append_text(f"{'='*70}\n\n", "separator")
+
+        for msg in messages:
+            agent = msg.get("agent", "?")
+            content = msg.get("content", "")
+            status = msg.get("status", "?")
+            turn = msg.get("turn", "?")
+            tag = f"agent_{agent}" if agent in AGENT_COLORS else "argument"
+            status_tag = f"status_{status.lower()}" if status.lower() in STATUS_COLORS else "dim"
+
+            self._append_text(f"  Turno {turn} — ", "dim")
+            self._append_text(f"{agent}\n", tag)
+            self._append_text(f"  {content}\n", "argument")
+            self._append_text(f"  [{status}]\n", status_tag)
+            self._append_text(f"  {'─'*70}\n", "separator")
+
+        self._set_status(f"Debate: {topic[:50]}", ACCENT_GREEN)
+        self.debate_text.config(state=tk.DISABLED)
 
     def _start_server(self):
         """Inicia o servidor em background."""
@@ -459,6 +658,14 @@ class THZMainsApp:
                 self.start_btn.config(state=tk.NORMAL)
                 self.stop_btn.config(state=tk.DISABLED)
 
+        elif evt == "debate_paused":
+            duration = data.get("duration_seconds", 60)
+            next_debate = data.get("next_debate", "?")
+            self._append_text(f"\n  ⏸ PAUSA — Proximo debate em {duration}s...\n", "header_yellow")
+            self._set_status(f"Pausa {duration}s — Proximo debate: {next_debate}", ACCENT_YELLOW)
+            self._start_loading(f"Aguardando {duration}s para proximo debate...")
+            self._start_pause_countdown(duration)
+
         elif evt == "session_complete":
             self._stop_loading()
             self._append_text(f"\n{'='*70}\n", "separator")
@@ -505,6 +712,23 @@ class THZMainsApp:
         frame = LOADING_FRAMES[self.loading_frame]
         self.loading_frame_label.config(text=f"  {frame} {self.loading_message}")
         self.root.after(100, self._animate_loading)
+
+    def _start_pause_countdown(self, duration):
+        """Inicia countdown da pausa na barra de status."""
+        self.pause_remaining = duration
+        self._update_pause_countdown()
+
+    def _update_pause_countdown(self):
+        """Atualiza countdown da pausa."""
+        if self.pause_remaining <= 0:
+            self._set_status("Iniciando proximo debate...", ACCENT_GREEN)
+            return
+        mins = self.pause_remaining // 60
+        secs = self.pause_remaining % 60
+        time_str = f"{mins:02d}:{secs:02d}" if mins > 0 else f"{secs}s"
+        self._set_status(f"Pausa — proximo debate em {time_str}", ACCENT_YELLOW)
+        self.pause_remaining -= 1
+        self.root.after(1000, self._update_pause_countdown)
 
     def _set_status(self, text, color=None):
         """Atualiza barra de status."""
