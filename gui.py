@@ -261,6 +261,34 @@ class THZMainsApp:
         self.debate_entries = []
         self.debate_ids = []
 
+        # === BASE DE CONHECIMENTO (sidebar) ===
+        knowledge_header = tk.Frame(sidebar_frame, bg=BG_DARK)
+        knowledge_header.pack(fill=tk.X, padx=5, pady=(10, 5))
+
+        tk.Label(
+            knowledge_header, text="🧠 Base de Conhecimento", fg=ACCENT_MAGENTA, bg=BG_DARK,
+            font=("Segoe UI", 11, "bold")
+        ).pack(side=tk.LEFT)
+
+        self.knowledge_list_frame = tk.Frame(sidebar_frame, bg=BG_DARK)
+        self.knowledge_list_frame.pack(fill=tk.X, padx=2)
+
+        self.knowledge_canvas = tk.Canvas(
+            self.knowledge_list_frame, bg=BG_MID, highlightthickness=0, bd=0, height=120
+        )
+        self.knowledge_scrollbar = Scrollbar(
+            self.knowledge_list_frame, orient=tk.VERTICAL, command=self.knowledge_canvas.yview
+        )
+        self.knowledge_inner = tk.Frame(self.knowledge_canvas, bg=BG_MID)
+
+        self.knowledge_inner.bind("<Configure>", lambda e: self.knowledge_canvas.configure(scrollregion=self.knowledge_canvas.bbox("all")))
+        self.knowledge_canvas.create_window((0, 0), window=self.knowledge_inner, anchor=tk.NW)
+        self.knowledge_canvas.configure(yscrollcommand=self.knowledge_scrollbar.set)
+
+        self.knowledge_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.knowledge_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.knowledge_canvas.bind("<MouseWheel>", lambda e: self.knowledge_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+
         # === AREA DE DEBATE ===
         debate_frame = tk.Frame(main_pane, bg=BG_MID)
         main_pane.add(debate_frame, minsize=400)
@@ -330,6 +358,42 @@ class THZMainsApp:
                 loop.close()
 
         threading.Thread(target=load, daemon=True).start()
+
+    def _load_knowledge_base(self):
+        """Carrega topicos discutidos do banco em background."""
+        def load():
+            import asyncio as _asyncio
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            try:
+                from server import CortexDB
+                topics = loop.run_until_complete(CortexDB.get_discussed_topics())
+                self.root.after(0, self._render_knowledge_base, topics)
+            except Exception as e:
+                pass
+            finally:
+                loop.close()
+
+        threading.Thread(target=load, daemon=True).start()
+
+    def _render_knowledge_base(self, topics):
+        """Renderiza a lista de topicos discutidos na sidebar."""
+        for widget in self.knowledge_inner.winfo_children():
+            widget.destroy()
+
+        if not topics:
+            tk.Label(
+                self.knowledge_inner, text="Nenhum topico ainda", fg=FG_DIM, bg=BG_MID,
+                font=("Segoe UI", 9), wraplength=220
+            ).pack(padx=10, pady=10)
+            return
+
+        for topic in topics[:10]:
+            topic_text = topic if isinstance(topic, str) else topic.get("topic", str(topic))
+            tk.Label(
+                self.knowledge_inner, text=f"• {topic_text[:40]}", fg=FG_PRIMARY, bg=BG_MID,
+                font=("Segoe UI", 9), anchor=tk.W, wraplength=220
+            ).pack(fill=tk.X, padx=10, pady=1)
 
     def _render_debate_history(self, debates):
         """Renderiza a lista de debates na sidebar."""
@@ -509,6 +573,8 @@ class THZMainsApp:
                 self.root.after(0, lambda: self.server_status.config(text="● Conectado", fg=ACCENT_GREEN))
                 self.root.after(0, lambda: self._set_status("Pronto para debate", ACCENT_GREEN))
                 self.root.after(0, lambda: self._append_system("Conectado ao servidor. Pronto para iniciar debate."))
+                self.root.after(100, self._load_debate_history)
+                self.root.after(200, self._load_knowledge_base)
 
                 while True:
                     try:
@@ -647,16 +713,29 @@ class THZMainsApp:
         elif evt == "debate_complete":
             self._stop_loading()
             reason = data.get("reason", "?")
-            motivo = "Consenso" if reason == "consensus" else "Timeout"
-            tag = "header_green" if reason == "consensus" else "header_yellow"
-            self._append_text(f"\n  DEBATE ENCERRADO — {motivo} | Turnos: {data.get('total_turns', '?')}\n", tag)
-            self._append_text(f"{'='*70}\n\n", "separator")
-            self._set_status(f"Debate encerrado: {motivo}", ACCENT_GREEN if reason == "consensus" else ACCENT_YELLOW)
-            # No modo autonomous, nao para — espera proximo debate
-            if self.current_mode == "single":
+            message = data.get("message", "")
+
+            if reason == "topic_exhausted":
+                motivo = "Topico Exaurido"
+                tag = "header_red"
+                self._append_text(f"\n  ⚠ {motivo}\n", tag)
+                if message:
+                    self._append_text(f"  {message}\n", "dim")
+                self._set_status(f"Topico exaurido — escolha outro topico", ACCENT_RED)
                 self.running = False
                 self.start_btn.config(state=tk.NORMAL)
                 self.stop_btn.config(state=tk.DISABLED)
+            else:
+                motivo = "Consenso" if reason == "consensus" else "Timeout"
+                tag = "header_green" if reason == "consensus" else "header_yellow"
+                self._append_text(f"\n  DEBATE ENCERRADO — {motivo} | Turnos: {data.get('total_turns', '?')}\n", tag)
+                self._append_text(f"{'='*70}\n\n", "separator")
+                self._set_status(f"Debate encerrado: {motivo}", ACCENT_GREEN if reason == "consensus" else ACCENT_YELLOW)
+                # No modo autonomous, nao para — espera proximo debate
+                if self.current_mode == "single":
+                    self.running = False
+                    self.start_btn.config(state=tk.NORMAL)
+                    self.stop_btn.config(state=tk.DISABLED)
 
         elif evt == "debate_paused":
             duration = data.get("duration_seconds", 60)

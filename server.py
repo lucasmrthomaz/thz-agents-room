@@ -798,6 +798,19 @@ class MultiAgentEngine:
         prior_knowledge = await CortexDB.retrieve_knowledge(topic, limit=3)
         topic_history = await CortexDB.get_topic_history(topic)
 
+        # Verificar se topico ja foi discutido muitas vezes
+        MAX_DISCUSSIONS = 5
+        if topic_history and topic_history['times_discussed'] >= MAX_DISCUSSIONS:
+            await websocket.send_json({
+                "event": "debate_complete",
+                "data": {
+                    "reason": "topic_exhausted",
+                    "total_turns": 0,
+                    "message": f"Topico '{topic}' ja foi discutido {topic_history['times_discussed']} vezes. Tente um topico diferente."
+                }
+            })
+            return
+
         # Construir contexto de conhecimento previo
         knowledge_context = ""
         if prior_knowledge:
@@ -839,7 +852,8 @@ class MultiAgentEngine:
                     user_prompt = (
                         f"Topico da Discusao: {topic}\n\n"
                         f"Historico:\n" + ("\n".join(transcript) if transcript else "Inicio do debate.") +
-                        f"\n\n{instruction}\n"
+                        f"\n\n{knowledge_context}\n"
+                        f"\n{instruction}\n"
                         f"Status: 'CONTINUE' para contra-argumentar; 'CONSENSUS' apenas se houver concordancia total."
                     )
 
