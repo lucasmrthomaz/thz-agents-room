@@ -18,6 +18,7 @@ class SemanticSearch:
     def __init__(self, embedder: Embedder = None, store: VectorStore = None):
         self.embedder = embedder or Embedder()
         self.store = store or VectorStore()
+        self._warned_unavailable = False
 
     async def buscar_argumentos_similares(
         self,
@@ -27,6 +28,16 @@ class SemanticSearch:
         top_k: int = 5
     ) -> List[Dict]:
         """Busca argumentos semanticamente similares a query."""
+        # Verificar disponibilidade uma vez
+        if self.embedder.available is None:
+            await self.embedder.check_availability()
+
+        if self.embedder.available is False:
+            if not self._warned_unavailable:
+                logger.info("[RAG] Embeddings indisponiveis — busca semantica desabilitada")
+                self._warned_unavailable = True
+            return []
+
         embedding = await self.embedder.embed(query)
         if not embedding:
             return []

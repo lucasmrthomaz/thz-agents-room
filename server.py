@@ -945,11 +945,14 @@ class MultiAgentEngine:
                         )
 
                     # Knowledge context via RAG (substitui busca por substring)
-                    rag_context = await self.semantic_search.construir_knowledge_context(
-                        topic, agent.name, history
-                    )
-                    if rag_context:
-                        knowledge_context += rag_context
+                    try:
+                        rag_context = await self.semantic_search.construir_knowledge_context(
+                            topic, agent.name, history
+                        )
+                        if rag_context:
+                            knowledge_context += rag_context
+                    except Exception as e:
+                        logger.debug(f"[RAG] Erro na busca semantica (ignorado): {e}")
 
                     # Quality feedback
                     instruction = self.quality_monitor.inject_quality_feedback(
