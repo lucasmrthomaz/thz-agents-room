@@ -350,29 +350,33 @@ class THZMainsApp:
 
         # Toolbar do visualizador de arquivos (oculta por padrão)
         self.viewer_toolbar = tk.Frame(debate_frame, bg=BG_LIGHT)
-        self.viewer_title_label = tk.Label(self.viewer_toolbar, text="", fg=ACCENT_CYAN, bg=BG_LIGHT, font=("Segoe UI", 10, "bold"))
-        self.viewer_title_label.pack(side=tk.LEFT, padx=10, pady=5)
 
         self.btn_close_viewer = tk.Button(
-            self.viewer_toolbar, text="✕ Fechar", font=("Segoe UI", 8, "bold"),
-            bg=ACCENT_RED, fg=BG_DARK, relief=tk.FLAT, padx=8, pady=2,
+            self.viewer_toolbar, text="✕ Fechar", font=("Segoe UI", 9, "bold"),
+            bg=ACCENT_RED, fg=BG_DARK, relief=tk.FLAT, padx=10, pady=3,
             command=self._close_file_viewer, cursor="hand2"
         )
-        self.btn_close_viewer.pack(side=tk.RIGHT, padx=5, pady=4)
+        self.btn_close_viewer.pack(side=tk.RIGHT, padx=(4, 8), pady=4)
 
         self.btn_open_file_dir = tk.Button(
-            self.viewer_toolbar, text="📂 Abrir no Explorer", font=("Segoe UI", 8, "bold"),
-            bg=BG_MID, fg=FG_PRIMARY, relief=tk.FLAT, padx=8, pady=2,
+            self.viewer_toolbar, text="📂 Abrir no Explorer", font=("Segoe UI", 9, "bold"),
+            bg=BG_MID, fg=FG_PRIMARY, relief=tk.FLAT, padx=10, pady=3,
             command=self._open_file_folder, cursor="hand2"
         )
-        self.btn_open_file_dir.pack(side=tk.RIGHT, padx=5, pady=4)
+        self.btn_open_file_dir.pack(side=tk.RIGHT, padx=4, pady=4)
 
         self.btn_copy_file = tk.Button(
-            self.viewer_toolbar, text="📋 Copiar Código", font=("Segoe UI", 8, "bold"),
-            bg=ACCENT_BLUE, fg=BG_DARK, relief=tk.FLAT, padx=8, pady=2,
+            self.viewer_toolbar, text="📋 Copiar Código", font=("Segoe UI", 9, "bold"),
+            bg=ACCENT_BLUE, fg=BG_DARK, relief=tk.FLAT, padx=10, pady=3,
             command=self._copy_file_content, cursor="hand2"
         )
-        self.btn_copy_file.pack(side=tk.RIGHT, padx=5, pady=4)
+        self.btn_copy_file.pack(side=tk.RIGHT, padx=4, pady=4)
+
+        self.viewer_title_label = tk.Label(
+            self.viewer_toolbar, text="", fg=ACCENT_CYAN, bg=BG_LIGHT,
+            font=("Segoe UI", 10, "bold"), anchor=tk.W
+        )
+        self.viewer_title_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 5), pady=4)
 
         self.debate_text = scrolledtext.ScrolledText(
             debate_frame, wrap=tk.WORD, font=("Consolas", 10),

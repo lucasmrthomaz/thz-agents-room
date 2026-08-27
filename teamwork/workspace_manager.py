@@ -70,12 +70,19 @@ class WorkspaceManager:
 
     @staticmethod
     def save_artifacts(project_id: str, artifacts: List[TeamworkArtifact], base_dir: Optional[Path] = None) -> Path:
-        """Salva a lista de artefatos no disco sob output/<project_id>/ de forma isolada."""
+        """Salva a lista de artefatos no disco sob output/<project_id>/ de forma isolada e deduplicada."""
         root = base_dir or OUTPUT_ROOT
         project_dir = (root / project_id).resolve()
         project_dir.mkdir(parents=True, exist_ok=True)
 
+        # Deduplicar artefatos por path (versão mais recente sobrescreve)
+        unique_artifacts: Dict[str, TeamworkArtifact] = {}
         for art in artifacts:
+            unique_artifacts[art.path] = art
+
+        final_artifacts = list(unique_artifacts.values())
+
+        for art in final_artifacts:
             try:
                 target_file = PathValidator.validate_safe_write_path(art.path, project_id, base_dir=root)
                 target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -91,7 +98,7 @@ class WorkspaceManager:
             manifest_data = {
                 "project_id": project_id,
                 "created_at": datetime.now().isoformat(),
-                "total_files": len(artifacts),
+                "total_files": len(final_artifacts),
                 "files": [
                     {
                         "path": a.path,
@@ -99,7 +106,7 @@ class WorkspaceManager:
                         "author_role": a.author_role,
                         "size_bytes": len(a.content.encode("utf-8"))
                     }
-                    for a in artifacts
+                    for a in final_artifacts
                 ]
             }
             manifest_file = project_dir / "project_manifest.json"

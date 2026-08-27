@@ -204,25 +204,28 @@ class EngineeringPipeline:
                 f"CONTEXTO PRODUZIDO ATÉ O MOMENTO PELO TIME:\n{history_summary}\n\n"
                 f"SUA TAREFA COMO {title.upper()}:\n"
                 f"{system_prompt}\n\n"
-                "IMPORTANTE: Forneça sua análise técnica e todos os arquivos necessários com marcadores '### FILE: caminho/do/arquivo.ext'."
+                "IMPORTANTE E OBRIGATÓRIO:\n"
+                "- Escreva código COMPLETO, sem 'pass', sem '...', sem omitir funções.\n"
+                "- Formate TODOS os arquivos gerados com os marcadores '### FILE: caminho/do/arquivo.ext' e feche os blocos de código com '```'."
             )
 
             payload = {
                 "model": model_to_use,
                 "messages": [
-                    {"role": "system", "content": f"Você é o {title} em um time de alto nível de engenharia de software."},
+                    {"role": "system", "content": f"Você é o {title} em um time de alto nível de engenharia de software. Você sempre entrega código e artefatos 100% completos e funcionais de produção."},
                     {"role": "user", "content": user_prompt}
                 ],
                 "stream": False,
                 "options": {
                     "temperature": 0.4,
-                    "num_ctx": request.num_ctx
+                    "num_ctx": request.num_ctx,
+                    "num_predict": 4096
                 }
             }
 
             try:
                 async with httpx.AsyncClient() as client:
-                    resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=180.0)
+                    resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=300.0)
                     resp.raise_for_status()
                     agent_output = resp.json()["message"]["content"].strip()
             except Exception as e:

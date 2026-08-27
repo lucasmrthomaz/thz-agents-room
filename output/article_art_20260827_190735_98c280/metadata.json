@@ -1,0 +1,6 @@
+{
+  "title": "Por que Seu Banco de Dados PostgreSQL Está Travando? Solução Completa com Connection Pooling, Locks e Índices",
+  "tags": ["PostgreSQL", "connection pooling", "locks", "indices", "performance optimization"],
+  "read_time_minutes": 5,
+  "summary": "Este guia detalhado cobre Connection Pooling, Locks e Índices no PostgreSQL, fornecendo soluções para melhorar o desempenho e evitar travamentos no banco de dados."
+}

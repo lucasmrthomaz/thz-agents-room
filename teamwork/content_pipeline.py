@@ -178,25 +178,28 @@ class ContentPipeline:
                 f"PRODUÇÃO EDITORIAL ATÉ O MOMENTO:\n{history_summary}\n\n"
                 f"SUA TAREFA COMO {title.upper()}:\n"
                 f"{system_prompt}\n\n"
-                "IMPORTANTE: Formate seus arquivos gerados com os marcadores '### FILE: caminho/do/arquivo.ext'."
+                "IMPORTANTE E OBRIGATÓRIO:\n"
+                "- Escreva o conteúdo COMPLETO, sem abreviações, sem '...', sem cortar no meio.\n"
+                "- Formate TODOS os arquivos gerados com os marcadores '### FILE: caminho/do/arquivo.ext' e feche os blocos de código com '```'."
             )
 
             payload = {
                 "model": model_to_use,
                 "messages": [
-                    {"role": "system", "content": f"Você é o {title} na redação técnica da comunidade de desenvolvedores."},
+                    {"role": "system", "content": f"Você é o {title} na redação técnica da comunidade de desenvolvedores. Você sempre entrega artigos e arquivos 100% completos e funcionais."},
                     {"role": "user", "content": user_prompt}
                 ],
                 "stream": False,
                 "options": {
                     "temperature": 0.5,
-                    "num_ctx": request.num_ctx
+                    "num_ctx": request.num_ctx,
+                    "num_predict": 4096
                 }
             }
 
             try:
                 async with httpx.AsyncClient() as client:
-                    resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=180.0)
+                    resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=300.0)
                     resp.raise_for_status()
                     agent_output = resp.json()["message"]["content"].strip()
             except Exception as e:
