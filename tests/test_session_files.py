@@ -45,7 +45,8 @@ class TestSessionFiles:
             debate_num=1,
             topic="Kafka vs RabbitMQ",
             transcript=transcript,
-            summary="Resumo do debate"
+            summary_short="Resumo curto do debate",
+            summary_full="Resumo completo do debate com contexto situacional"
         )
 
         # Verifica se arquivos foram criados
@@ -73,7 +74,8 @@ class TestSessionFiles:
         # Verifica conteudo do summary
         with open(debate_dir / "summary.json", "r", encoding="utf-8") as f:
             summary = json.load(f)
-            assert summary["summary"] == "Resumo do debate"
+            assert summary["summary_short"] == "Resumo curto do debate"
+            assert summary["summary_full"] == "Resumo completo do debate com contexto situacional"
 
     async def test_save_debate_without_summary(self, tmp_path):
         """Testa salvamento de debate sem resumo."""

@@ -375,23 +375,7 @@ def main():
 
 async def _show_history():
     """Mostra historico de debates recentes."""
-    try:
-        async with websockets.connect(URI) as ws:
-            # Enviar comando de historico (usando autonomous por brevidade)
-            await ws.send(json.dumps({"mode": "single", "topic": "__history__", "max_turns": 1}))
-    except Exception:
-        pass
-
-    # Ler direto do banco via HTTP (fallback)
-    import httpx
-    try:
-        async with httpx.AsyncClient() as client:
-            # Usar endpoint existente ou ler do SQLite diretamente
-            pass
-    except Exception:
-        pass
-
-    # Fallback: ler do SQLite diretamente
+    # Ler direto do banco SQLite
     import aiosqlite
     try:
         async with aiosqlite.connect("data/thz-room-cortex.db") as db:

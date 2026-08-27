@@ -1,4 +1,5 @@
 # THZ Minds — Motor Multiagente Local
+(ORIGINALMENTE thz-agents-room)
 
 **8 LLMs (agora 9) debatendo sobre tecnologia em tempo real via Ollama.**
 
@@ -19,7 +20,9 @@ Sistema local de debates multiagente onde agentes de IA discutem temas de tecnol
 - **Deteccao de Plagio** — N-gramas + frases inteiras, força originalidade
 - **Anti-Loop** — Diversity score + trend analysis, encerra espirais
 - **Base de Conhecimento** — Debates anteriores alimentam novas discussões
-- **Resumo Automatico** — Gera resumo ao final de cada debate
+- **Resumo Automatico** — Resumo curto + completo ao final de cada debate
+- **Idempotencia** — Chaves unicas em mensagens, upserts atomicos, request dedup
+- **Compactacao** — Sessoes antigas comprimidas automaticamente (>30 dias)
 - **RAG + Embeddings** — Busca semantica de argumentos relevantes (opcional)
 - **Fine-tuning QLoRA** — Pipeline completo para treinar modelos por agente
 
@@ -160,12 +163,11 @@ Tabelas SQLite (`data/thz-room-cortex.db`):
 
 | Tabela | Descricao |
 |--------|-----------|
-| `conversations` | Debates realizados |
-| `messages` | Argumentos de cada agente por turno |
-| `topic_memory` | Topicos discutidos e frequencia |
-| `agent_skills` | Expertise por agente/dominio |
+| `conversations` | Debates + summary_short + summary_full |
+| `messages` | Argumentos com idempotency_key |
+| `topic_memory` | Topicos discutidos com upsert atomico |
+| `agent_skills` | Expertise por agente com upsert atomico |
 | `argument_embeddings` | Embeddings para busca semantica |
-| `debate_health` | Metricas de saude do debate |
 
 ---
 
@@ -178,6 +180,8 @@ Tabelas SQLite (`data/thz-room-cortex.db`):
 | Deteccao de plagio | N-gramas de 8 palavras + frases 90% |
 | Validacao de idioma | Rejeita texto nao-portugues |
 | Context window | Auto-expand 8192 → 32768 |
+| Idempotencia | Chaves unicas + upserts atomicos |
+| Compactacao | Sessoes >30 dias automaticas |
 
 ---
 
@@ -209,12 +213,14 @@ Ver [docs/ROADMAP.md](docs/ROADMAP.md) para detalhes completos.
 
 - [x] 9 agentes especializados
 - [x] Deteccao de plagio e repeticao
-- [x] Resumo automatico de debates
+- [x] Resumo automatico de debates (curto + completo)
 - [x] Base de conhecimento
 - [x] GUI com sidebar e loading
 - [x] Modo autonomo
 - [x] RAG + embeddings (opcional)
 - [x] Fine-tuning QLoRA pipeline
+- [x] Idempotencia no banco e aplicacao
+- [x] Compactacao de sessoes antigas
 - [ ] Dashboard web (futuro)
 - [ ] Multi-modelo por agente (futuro)
 

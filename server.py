@@ -170,6 +170,8 @@ class CortexDB:
                     id TEXT PRIMARY KEY,
                     topic TEXT NOT NULL,
                     session_id TEXT,
+                    summary_short TEXT,
+                    summary_full TEXT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
             """)
@@ -181,6 +183,7 @@ class CortexDB:
                     content TEXT NOT NULL,
                     status TEXT NOT NULL,
                     turn INTEGER NOT NULL,
+                    idempotency_key TEXT UNIQUE,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
                 );
@@ -219,18 +222,6 @@ class CortexDB:
                 );
             """)
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS content_references (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    conversation_id TEXT NOT NULL,
-                    reference_type TEXT NOT NULL,
-                    reference_key TEXT NOT NULL,
-                    reference_summary TEXT NOT NULL,
-                    relevance_score REAL DEFAULT 0.5,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-                );
-            """)
-            await db.execute("""
                 CREATE TABLE IF NOT EXISTS argument_embeddings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id INTEGER NOT NULL UNIQUE,
@@ -241,23 +232,9 @@ class CortexDB:
                     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
                 );
             """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS debate_health (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    conversation_id TEXT NOT NULL,
-                    turn INTEGER NOT NULL,
-                    diversity_score REAL,
-                    trend TEXT,
-                    repetition_count INTEGER DEFAULT 0,
-                    plagiarism_count INTEGER DEFAULT 0,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-                );
-            """)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_emb_agent ON argument_embeddings(agent_name);")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_emb_topic ON argument_embeddings(topic);")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_emb_message ON argument_embeddings(message_id);")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_health_conv ON debate_health(conversation_id);")
             await db.commit()
             logger.info(f"Cortex DB inicializado: {DB_PATH}")
 
@@ -265,7 +242,7 @@ class CortexDB:
     async def save_conversation(conversation_id: str, topic: str, session_id: str = None):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "INSERT INTO conversations (id, topic, session_id) VALUES (?, ?, ?);",
+                "INSERT OR IGNORE INTO conversations (id, topic, session_id) VALUES (?, ?, ?);",
                 (conversation_id, topic, session_id)
             )
             await db.commit()
@@ -273,53 +250,46 @@ class CortexDB:
     @staticmethod
     async def save_message(conversation_id: str, agent_name: str, content: str, status: str, turn: int):
         async with aiosqlite.connect(DB_PATH) as db:
+            idempotency_key = f"{conversation_id}:{turn}:{agent_name}"
             await db.execute(
-                "INSERT INTO messages (conversation_id, agent_name, content, status, turn) VALUES (?, ?, ?, ?, ?);",
-                (conversation_id, agent_name, content, status, turn)
+                "INSERT OR IGNORE INTO messages (conversation_id, agent_name, content, status, turn, idempotency_key) VALUES (?, ?, ?, ?, ?, ?);",
+                (conversation_id, agent_name, content, status, turn, idempotency_key)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def update_conversation_summary(conversation_id: str, summary_short: str, summary_full: str):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE conversations SET summary_short = ?, summary_full = ? WHERE id = ?;",
+                (summary_short, summary_full, conversation_id)
             )
             await db.commit()
 
     @staticmethod
     async def update_topic_memory(topic: str, consensus: bool):
         async with aiosqlite.connect(DB_PATH) as db:
-            existing = await db.execute_fetchall(
-                "SELECT id, times_discussed FROM topic_memory WHERE topic = ?;", (topic,)
-            )
-            if existing:
-                row = existing[0]
-                new_count = row[1] + 1
-                await db.execute(
-                    "UPDATE topic_memory SET times_discussed = ?, last_consensus = ?, last_discussed_at = CURRENT_TIMESTAMP WHERE id = ?;",
-                    (new_count, consensus, row[0])
-                )
-            else:
-                await db.execute(
-                    "INSERT INTO topic_memory (topic, last_consensus, last_discussed_at) VALUES (?, ?, CURRENT_TIMESTAMP);",
-                    (topic, consensus)
-                )
+            await db.execute("""
+                INSERT INTO topic_memory (topic, last_consensus, last_discussed_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(topic) DO UPDATE SET
+                    times_discussed = times_discussed + 1,
+                    last_consensus = excluded.last_consensus,
+                    last_discussed_at = CURRENT_TIMESTAMP;
+            """, (topic, consensus))
             await db.commit()
 
     @staticmethod
     async def update_agent_skills(agent_name: str, domain: str, contributed_to_consensus: bool):
         async with aiosqlite.connect(DB_PATH) as db:
-            existing = await db.execute_fetchall(
-                "SELECT id, times_applied, consensus_contributions FROM agent_skills WHERE agent_name = ? AND skill_domain = ?;",
-                (agent_name, domain)
-            )
-            if existing:
-                row = existing[0]
-                new_applied = row[1] + 1
-                new_consensus = row[2] + (1 if contributed_to_consensus else 0)
-                new_level = min(1.0, new_consensus / max(new_applied, 1))
-                await db.execute(
-                    "UPDATE agent_skills SET times_applied = ?, consensus_contributions = ?, expertise_level = ? WHERE id = ?;",
-                    (new_applied, new_consensus, new_level, row[0])
-                )
-            else:
-                await db.execute(
-                    "INSERT INTO agent_skills (agent_name, skill_domain, times_applied, consensus_contributions, expertise_level) VALUES (?, ?, 1, ?, ?);",
-                    (agent_name, domain, 1 if contributed_to_consensus else 0, 1.0 if contributed_to_consensus else 0.0)
-                )
+            await db.execute("""
+                INSERT INTO agent_skills (agent_name, skill_domain, times_applied, consensus_contributions, expertise_level)
+                VALUES (?, ?, 1, ?, ?)
+                ON CONFLICT(agent_name, skill_domain) DO UPDATE SET
+                    times_applied = times_applied + 1,
+                    consensus_contributions = consensus_contributions + excluded.consensus_contributions,
+                    expertise_level = CAST(consensus_contributions + excluded.consensus_contributions AS REAL) / (times_applied + 1);
+            """, (agent_name, domain, 1 if contributed_to_consensus else 0, 1.0 if contributed_to_consensus else 0.0))
             await db.commit()
 
     @staticmethod
@@ -472,7 +442,8 @@ class SessionFiles:
 
     @staticmethod
     async def save_debate(session_dir: Path, debate_num: int, topic: str,
-                          transcript: List[Dict], summary: str = None):
+                          transcript: List[Dict], summary_short: str = None,
+                          summary_full: str = None):
         debate_dir = session_dir / f"debate_{debate_num:03d}"
         debate_dir.mkdir(exist_ok=True)
 
@@ -489,14 +460,75 @@ class SessionFiles:
         with open(debate_dir / "transcript.json", "w", encoding="utf-8") as f:
             json.dump(transcript, f, ensure_ascii=False, indent=2)
 
-        if summary:
+        summary_data = {}
+        if summary_short:
+            summary_data["summary_short"] = summary_short
+        if summary_full:
+            summary_data["summary_full"] = summary_full
+        if summary_data:
+            summary_data["created_at"] = datetime.now().isoformat()
             with open(debate_dir / "summary.json", "w", encoding="utf-8") as f:
-                json.dump({"summary": summary}, f, ensure_ascii=False, indent=2)
+                json.dump(summary_data, f, ensure_ascii=False, indent=2)
 
     @staticmethod
     async def save_session_summary(session_dir: Path, data: Dict):
         with open(session_dir / "nightly_summary.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    async def compact_old_sessions(sessions_dir: Path, days: int = 30):
+        """Remove transcripts de sessoes antigas, mantendo summaries."""
+        cutoff = datetime.now() - timedelta(days=days)
+        compacted = 0
+
+        if not sessions_dir.exists():
+            return compacted
+
+        for date_dir in sessions_dir.iterdir():
+            if not date_dir.is_dir():
+                continue
+
+            for time_dir in date_dir.iterdir():
+                if not time_dir.is_dir():
+                    continue
+
+                for session_dir in time_dir.iterdir():
+                    if not session_dir.is_dir():
+                        continue
+
+                    # Verificar idade da sessao pelo nome (formato: YYYY-MM-DD_HH-MM)
+                    try:
+                        session_date_str = session_dir.name[:10]
+                        session_date = datetime.strptime(session_date_str, "%Y-%m-%d")
+                        if session_date >= cutoff:
+                            continue
+                    except (ValueError, IndexError):
+                        continue
+
+                    # Compactar cada debate
+                    for debate_dir in session_dir.glob("debate_*"):
+                        transcript_file = debate_dir / "transcript.json"
+                        summary_file = debate_dir / "summary.json"
+
+                        # So deleta se summary existe
+                        if transcript_file.exists() and summary_file.exists():
+                            transcript_file.unlink()
+
+                            # Comprime metadata
+                            metadata_file = debate_dir / "metadata.json"
+                            if metadata_file.exists():
+                                try:
+                                    metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+                                    metadata.pop("transcript_preview", None)
+                                    metadata["compacted"] = True
+                                    metadata["compacted_at"] = datetime.now().isoformat()
+                                    metadata_file.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+                                except Exception:
+                                    pass
+
+                            compacted += 1
+
+        return compacted
 
 # =====================================================================
 # 5. GERACAO DE TOPICOS PELO OLLAMA
@@ -736,6 +768,64 @@ async def generate_debate_summary(model: str, topic: str, history: List[Dict], c
     except Exception as e:
         logger.error(f"[SUMMARY] Erro ao gerar resumo do debate: {e}")
         return ""
+
+
+async def generate_full_summary(model: str, topic: str, history: List[Dict],
+                                 summary_short: str, consensus: bool) -> str:
+    """Gera resumo completo preservando contexto situacional."""
+    # Montar transcript completo (mais turnos que o resumo curto)
+    transcript = "\n".join(
+        f"[{h['author']} - Turno {h['turn']}]: {h['content'][:300]}"
+        for h in history[-24:]  # Ultimos 24 turnos
+    )
+
+    prompt = (
+        "Gere um RESUMO COMPLETO deste debate tecnico entre agentes de IA.\n"
+        "Preserve o contexto situacional - tudo que aconteceu.\n\n"
+        "Formato OBRIGATORIO:\n"
+        "## Contexto\n"
+        "- Por que este topico foi discutido\n"
+        "- Problema ou decisao que motivou o debate\n\n"
+        "## Posicoes Iniciais\n"
+        "- Resumo da posicao de cada agente no inicio do debate\n\n"
+        "## Evolucao do Debate\n"
+        "- Como as posicoes mudaram ao longo dos turnos\n"
+        "- Quais argumentos foram decisivos para mudar opinioes\n\n"
+        "## Argumentos Decisivos\n"
+        "- Top 3 argumentos mais importantes (com autor)\n"
+        "- Por que foram importantes\n\n"
+        "## Consenso ou Decisao\n"
+        "- O que foi decidido (ou 'Sem consenso' se divergencia)\n"
+        "- Principais pontos de acordo e desacordo\n\n"
+        "## Aprendizados\n"
+        "- Insights que devem ser lembrados para debates futuros\n"
+        "- Conhecimento acumulado relevante\n\n"
+        "## Proximos Passos\n"
+        "- Implicacoes praticas\n"
+        "- O que deve ser implementado ou investigado\n\n"
+        f"Topico: {topic}\n"
+        f"Resultado: {'Consenso' if consensus else 'Sem consenso'}\n"
+        f"Total de turnos: {len(history)}\n"
+        f"Resumo curto: {summary_short}\n\n"
+        f"Transcript completo:\n{transcript}\n\n"
+        "Resumo completo:"
+    )
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "options": {"temperature": 0.3, "num_ctx": 4096}
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=120.0)
+            resp.raise_for_status()
+            return resp.json()["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"[FULL-SUMMARY] Erro ao gerar resumo completo: {e}")
+        return summary_short  # Fallback para resumo curto
 
 # =====================================================================
 # 6. AGENTES
@@ -1122,36 +1212,44 @@ class MultiAgentEngine:
                         last_consensus = False
 
                     if consecutive_consensus >= len(self.agents) and current_turn >= self.min_turns:
-                        # Gerar resumo do debate
-                        summary = await generate_debate_summary(
+                        # Gerar resumos do debate
+                        summary_short = await generate_debate_summary(
                             self.agents[0].model, topic, history, True
+                        )
+                        summary_full = await generate_full_summary(
+                            self.agents[0].model, topic, history, summary_short, True
                         )
                         await websocket.send_json({
                             "event": "debate_complete",
                             "data": {
                                 "reason": "consensus",
                                 "total_turns": current_turn,
-                                "summary": summary
+                                "summary": summary_short,
+                                "summary_full": summary_full
                             }
                         })
-                        return last_consensus
+                        return last_consensus, summary_short, summary_full
 
                     if current_turn >= self.max_turns:
                         break
 
-        # Gerar resumo do debate (timeout)
-        summary = await generate_debate_summary(
+        # Gerar resumos do debate (timeout)
+        summary_short = await generate_debate_summary(
             self.agents[0].model, topic, history, last_consensus
+        )
+        summary_full = await generate_full_summary(
+            self.agents[0].model, topic, history, summary_short, last_consensus
         )
         await websocket.send_json({
             "event": "debate_complete",
             "data": {
                 "reason": "max_turns_reached",
                 "total_turns": current_turn,
-                "summary": summary
+                "summary": summary_short,
+                "summary_full": summary_full
             }
         })
-        return last_consensus
+        return last_consensus, summary_short, summary_full
 
 # =====================================================================
 # 8. FASTAPI + WEBSOCKET
@@ -1162,6 +1260,12 @@ async def lifespan(app: FastAPI):
     SESSIONS_DIR.mkdir(exist_ok=True)
     DATA_DIR.mkdir(exist_ok=True)
     await CortexDB.init()
+
+    # Compacta sessoes antigas no startup
+    compacted = await SessionFiles.compact_old_sessions(SESSIONS_DIR, days=30)
+    if compacted > 0:
+        logger.info(f"[STARTUP] {compacted} transcripts compactados (sessoes >30 dias)")
+
     logger.info("[STARTUP] THz Room iniciado com sucesso")
     yield
     # Shutdown gracioso
@@ -1181,12 +1285,25 @@ async def _get_transcript(conversation_id: str) -> list:
         )
         return [{"author": r[0], "content": r[1], "status": r[2], "turn": r[3]} for r in rows]
 
+# Set para rastrear requests ativos (idempotencia)
+_active_requests: set = set()
+
 @app.websocket("/ws/debate")
 async def debate_websocket(websocket: WebSocket):
     await websocket.accept()
 
     try:
         raw_payload = await websocket.receive_json()
+
+        # Idempotencia: verificar request_id duplicado
+        request_id = raw_payload.get("request_id") or str(uuid.uuid4())
+        if request_id in _active_requests:
+            await websocket.send_json({
+                "event": "error",
+                "data": {"message": "Request duplicado detectado"}
+            })
+            return
+        _active_requests.add(request_id)
 
         mode = raw_payload.get("mode", "single")
 
@@ -1198,8 +1315,9 @@ async def debate_websocket(websocket: WebSocket):
 
             conv_id = str(uuid.uuid4())
             logger.info(f"[SINGLE] Topico: {req.topic[:60]} | Modelo: {model}")
-            await engine.execute_debate(conv_id, req.topic, websocket)
-            await CortexDB.update_topic_memory(req.topic, True)
+            consensus, summary_short, summary_full = await engine.execute_debate(conv_id, req.topic, websocket)
+            await CortexDB.update_topic_memory(req.topic, consensus)
+            await CortexDB.update_conversation_summary(conv_id, summary_short, summary_full)
 
         elif mode == "autonomous":
             req = AutonomousSessionRequest(**raw_payload)
@@ -1247,14 +1365,15 @@ async def debate_websocket(websocket: WebSocket):
                 conv_id = str(uuid.uuid4())
                 agents = create_agents(model)
                 engine = MultiAgentEngine(agents=agents, num_ctx=req.num_ctx, max_turns=req.max_turns)
-                consensus = await engine.execute_debate(conv_id, topic, websocket, session_id)
+                consensus, summary_short, summary_full = await engine.execute_debate(conv_id, topic, websocket, session_id)
 
                 topics_used.append({"topic": topic, "consensus": consensus})
                 await CortexDB.update_topic_memory(topic, consensus)
+                await CortexDB.update_conversation_summary(conv_id, summary_short, summary_full)
 
                 # Salva transcript do debate
                 transcript = await _get_transcript(conv_id)
-                await SessionFiles.save_debate(session_dir, debate_count, topic, transcript, summary=None)
+                await SessionFiles.save_debate(session_dir, debate_count, topic, transcript, summary_short, summary_full)
 
                 if datetime.now() + timedelta(minutes=10) < end_time and not shutdown_manager.should_exit:
                     logger.info(f"[PAUSA] 1 minuto antes do proximo debate...")
@@ -1302,6 +1421,7 @@ async def debate_websocket(websocket: WebSocket):
     except Exception as exc:
         logger.error(f"Erro WebSocket: {exc}")
     finally:
+        _active_requests.discard(request_id)
         try:
             await websocket.close()
         except RuntimeError:

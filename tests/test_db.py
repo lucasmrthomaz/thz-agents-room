@@ -31,7 +31,7 @@ class TestCortexDB:
             assert "topic_memory" in table_names
             assert "agent_skills" in table_names
             assert "debate_patterns" in table_names
-            assert "content_references" in table_names
+            assert "argument_embeddings" in table_names
 
     async def test_save_conversation(self, temp_db):
         """Testa salvamento de conversa."""

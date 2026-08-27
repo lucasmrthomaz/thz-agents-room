@@ -34,6 +34,10 @@ O orquestrador rejeita topicos que fogem desses guardrails.
 | DevOps | CI/CD, infraestrutura como codigo, automacao |
 | DBA | Modelagem de dados, performance de queries, normalizacao |
 | Security | Vulnerabilidades, autenticacao, boas praticas de seguranca |
+| Desenvolvedor Senior |
+| Desenvolvedor Pleno |
+| Desenvolvedor Junior |
+| QA Tester | 
 
 ### Negocio (3)
 
