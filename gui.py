@@ -7,7 +7,7 @@ import asyncio
 import json
 import threading
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, Scrollbar
 import websockets
 
 URI = "ws://127.0.0.1:8000/ws/debate"
