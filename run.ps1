@@ -23,10 +23,10 @@ $ErrorActionPreference = "Stop"
 
 function Show-Banner {
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║   THz Room - Motor Multiagente       ║" -ForegroundColor Cyan
-    Write-Host "  ║   8 LLMs debatendo sobre tecnologia  ║" -ForegroundColor Cyan
-    Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  ========================================" -ForegroundColor Cyan
+    Write-Host "     THz Room - Motor Multiagente Local   " -ForegroundColor Cyan
+    Write-Host "     8 LLMs debatendo sobre tecnologia    " -ForegroundColor Cyan
+    Write-Host "  ========================================" -ForegroundColor Cyan
     Write-Host ""
 }
 
@@ -73,7 +73,8 @@ function Start-Client {
     }
 
     Write-Host "  [CLIENT] Topico: $Topic" -ForegroundColor Green
-    Write-Host "  [CLIENT] Turnos: $Turns | Ctx: $Ctx | Modelo: $(if ($Model) { $Model } else { 'auto' })" -ForegroundColor Gray
+    $modelo = if ($Model) { $Model } else { "auto" }
+    Write-Host "  [CLIENT] Turnos: $Turns | Ctx: $Ctx | Modelo: $modelo" -ForegroundColor Gray
     Write-Host ""
 
     $args = @("client.py", "--topic", $Topic, "--turns", $Turns, "--ctx", $Ctx)
@@ -91,8 +92,9 @@ function Start-Autonomous {
         $Hours = if ($input) { [int]$input } else { 8 }
     }
 
+    $modelo = if ($Model) { $Model } else { "auto" }
     Write-Host "  [AUTONOMO] Duracao: ${Hours}h" -ForegroundColor Green
-    Write-Host "  [AUTONOMO] Turnos/debate: $Turns | Ctx: $Ctx | Modelo: $(if ($Model) { $Model } else { 'auto' })" -ForegroundColor Gray
+    Write-Host "  [AUTONOMO] Turnos/debate: $Turns | Ctx: $Ctx | Modelo: $modelo" -ForegroundColor Gray
     Write-Host "  [AUTONOMO] Pausa: 10min entre debates" -ForegroundColor Gray
     Write-Host "  [AUTONOMO] Ollama gera topicos automaticamente" -ForegroundColor Gray
     Write-Host "  [AUTONOMO] Resumo gerado ao final" -ForegroundColor Gray
