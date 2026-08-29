@@ -978,14 +978,22 @@ async def generate_topic(model: str, history_topics: List[str]) -> str:
         "options": {"temperature": 0.9, "num_ctx": 1024}
     }
 
-    MAX_RETRIES = 2
-    for attempt in range(MAX_RETRIES + 1):
+    MAX_RETRIES = 3
+    for attempt in range(MAX_RETRIES):
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=90.0)
                 resp.raise_for_status()
-                raw = resp.json()["message"]["content"]
+                content = resp.json().get("message", {}).get("content", "")
 
+                if not content or not content.strip():
+                    logger.warning(f"[TOPICOS] Ollama retornou vazio (attempt {attempt + 1}/{MAX_RETRIES})")
+                    if attempt < MAX_RETRIES - 1:
+                        await asyncio.sleep(2)
+                        continue
+                    break
+
+                raw = content
                 try:
                     data = json.loads(raw)
                     topic = data.get("topic", "").strip()
@@ -995,7 +1003,8 @@ async def generate_topic(model: str, history_topics: List[str]) -> str:
                 if 10 <= len(topic) <= 150 and not topic.startswith("{"):
                     if is_too_similar(topic, history_topics[-30:]):
                         logger.warning(f"[TOPICOS] Similar demais: {topic[:60]}...")
-                        if attempt < MAX_RETRIES:
+                        if attempt < MAX_RETRIES - 1:
+                            await asyncio.sleep(1)
                             continue
                         if available := [t for t in FALLBACK_TOPICS
                                          if not is_too_similar(t, history_topics[-30:])]:
@@ -1004,22 +1013,23 @@ async def generate_topic(model: str, history_topics: List[str]) -> str:
                     logger.info(f"[TOPICOS] Ollama: {topic}")
                     return topic
                 else:
-                    logger.warning(f"[TOPICOS] Invalido (attempt {attempt + 1}): raw={raw[:100]!r}, parsed={topic[:80]!r}")
-                    if attempt < MAX_RETRIES:
+                    logger.warning(f"[TOPICOS] Invalido (attempt {attempt + 1}/{MAX_RETRIES}): raw={raw[:100]!r}, parsed={topic[:80]!r}")
+                    if attempt < MAX_RETRIES - 1:
+                        await asyncio.sleep(1)
                         continue
-                    if available := [t for t in FALLBACK_TOPICS
-                                     if not is_too_similar(t, history_topics[-30:])]:
-                        return random.choice(available)
-                    return random.choice(FALLBACK_TOPICS)
 
         except Exception as e:
-            logger.error(f"[TOPICOS] Erro ao gerar (attempt {attempt + 1}): {e}")
-            if attempt < MAX_RETRIES:
-                continue
-            if available := [t for t in FALLBACK_TOPICS
-                             if not is_too_similar(t, history_topics[-30:])]:
-                return random.choice(available)
-            return random.choice(FALLBACK_TOPICS)
+            logger.error(f"[TOPICOS] Erro ao gerar (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(2)
+
+    if available := [t for t in FALLBACK_TOPICS
+                     if not is_too_similar(t, history_topics[-30:])]:
+        fallback = random.choice(available)
+    else:
+        fallback = random.choice(FALLBACK_TOPICS)
+    logger.info(f"[TOPICOS] Usando fallback: {fallback}")
+    return fallback
 
 async def generate_summary(model: str, topics: List[Dict]) -> str:
     """Gera resumo da sessao de debates."""
@@ -2477,41 +2487,52 @@ async def debate_websocket(websocket: WebSocket):
             }
 
             while datetime.now() < end_time and not shutdown_manager.should_exit:
-                history_topics = await CortexDB.get_discussed_topics()
-                # Extrair topicos strings de topics_used (que contem dicts)
-                used_topic_strings = [t["topic"] if isinstance(t, dict) else t for t in topics_used]
-                topic = await generate_topic(model, history_topics + used_topic_strings)
-                debate_count += 1
+                try:
+                    history_topics = await CortexDB.get_discussed_topics()
+                    used_topic_strings = [t["topic"] if isinstance(t, dict) else t for t in topics_used]
+                    topic = await generate_topic(model, history_topics + used_topic_strings)
+                    debate_count += 1
 
-                # Atualiza estado para shutdown
-                shutdown_manager.current_session["debate_count"] = debate_count
-                shutdown_manager.current_session["topics"] = topics_used
+                    shutdown_manager.current_session["debate_count"] = debate_count
+                    shutdown_manager.current_session["topics"] = topics_used
 
-                await websocket.send_json({
-                    "event": "debate_start",
-                    "data": {"debate_num": debate_count, "topic": topic}
-                })
+                    await websocket.send_json({
+                        "event": "debate_start",
+                        "data": {"debate_num": debate_count, "topic": topic}
+                    })
 
-                conv_id = str(uuid.uuid4())
-                agents = create_agents(model)
-                engine = MultiAgentEngine(agents=agents, num_ctx=req.num_ctx, max_turns=req.max_turns, model=model)
-                consensus, summary_short, summary_full = await engine.execute_debate(conv_id, topic, websocket, session_id)
+                    conv_id = str(uuid.uuid4())
+                    agents = create_agents(model)
+                    engine = MultiAgentEngine(agents=agents, num_ctx=req.num_ctx, max_turns=req.max_turns, model=model)
+                    consensus, summary_short, summary_full = await engine.execute_debate(conv_id, topic, websocket, session_id)
 
-                topics_used.append({"topic": topic, "consensus": consensus})
-                await CortexDB.update_topic_memory(topic, consensus)
-                await CortexDB.update_conversation_summary(conv_id, summary_short, summary_full)
+                    topics_used.append({"topic": topic, "consensus": consensus})
+                    await CortexDB.update_topic_memory(topic, consensus)
+                    await CortexDB.update_conversation_summary(conv_id, summary_short, summary_full)
 
-                # Salva transcript do debate
-                transcript = await _get_transcript(conv_id)
-                await SessionFiles.save_debate(session_dir, debate_count, topic, transcript, summary_short, summary_full)
+                    transcript = await _get_transcript(conv_id)
+                    await SessionFiles.save_debate(session_dir, debate_count, topic, transcript, summary_short, summary_full)
+
+                except Exception as debate_err:
+                    logger.error(f"[AUTONOMOUS] Debate #{debate_count + 1} falhou: {debate_err}. Pulando para proximo...")
+                    continue
 
                 if datetime.now() + timedelta(minutes=10) < end_time and not shutdown_manager.should_exit:
-                    logger.info(f"[PAUSA] 30 segundos antes do proximo debate...")
+                    pause_seconds = 30
+                    logger.info(f"[PAUSA] {pause_seconds}s antes do proximo debate...")
                     await websocket.send_json({
                         "event": "debate_paused",
-                        "data": {"duration_seconds": 30, "next_debate": debate_count + 1}
+                        "data": {"duration_seconds": pause_seconds, "next_debate": debate_count + 1}
                     })
-                    await asyncio.sleep(30)
+                    for _ in range(pause_seconds):
+                        if shutdown_manager.should_exit:
+                            break
+                        await asyncio.sleep(1)
+                        try:
+                            await websocket.send_json({"event": "ping"})
+                        except Exception:
+                            logger.warning("[PAUSA] WebSocket ping falhou, conexao pode estar morta")
+                            break
 
             # Limpa shutdown manager
             shutdown_manager.current_session = None

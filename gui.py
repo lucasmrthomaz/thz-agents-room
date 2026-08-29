@@ -1201,6 +1201,9 @@ class THZMainsApp:
                     self.start_btn.config(state=tk.NORMAL)
                     self.stop_btn.config(state=tk.DISABLED)
 
+        elif evt == "ping":
+            pass
+
         elif evt == "debate_paused":
             duration = data.get("duration_seconds", 60)
             next_debate = data.get("next_debate", "?")
