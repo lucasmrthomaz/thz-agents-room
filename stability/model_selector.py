@@ -2,9 +2,11 @@ import time, logging, asyncio, httpx
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
+from config import settings as cfg
+
 logger = logging.getLogger('ThzRoom.Stability.ModelSelector')
-OLLAMA_BASE_URL = 'http://127.0.0.1:11434'
-DEFAULT_FALLBACK_MODEL = 'qwen2.5:7b'
+OLLAMA_BASE_URL = cfg.OLLAMA_BASE_URL
+DEFAULT_FALLBACK_MODEL = cfg.DEFAULT_MODEL
 MAX_STRIKES_BEFORE_DEGRADE = 1
 COOLDOWN_SECONDS = 180.0
 

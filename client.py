@@ -15,10 +15,19 @@ import asyncio
 import argparse
 import json
 import sys
+import os
 import time
 import websockets
 
-URI = "ws://127.0.0.1:8000/ws/debate"
+# Fix Windows console encoding for Unicode characters
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+from config import settings as cfg
+
+URI = cfg.WS_URI
 
 # Cores ANSI
 RESET   = "\033[0m"
@@ -246,7 +255,7 @@ async def run_autonomous(duration_hours: float, num_ctx: int, model: str = None)
 async def _run_session(payload: dict):
     """Conecta ao WebSocket e processa eventos."""
     try:
-        async with websockets.connect(URI) as ws:
+        async with websockets.connect(URI, ping_timeout=120, close_timeout=10) as ws:
             await ws.send(json.dumps(payload))
             loading_frame = 0
             current_turn = 0

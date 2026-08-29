@@ -25,10 +25,12 @@ from .models import (
 )
 from .workspace_manager import WorkspaceManager
 
+from config import settings as cfg
+
 logger = logging.getLogger("ThzRoom.Teamwork.Content")
 
-OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
-DEFAULT_MODEL = "qwen2.5:7b"
+OLLAMA_CHAT_URL = cfg.OLLAMA_CHAT_URL
+DEFAULT_MODEL = cfg.DEFAULT_MODEL
 
 
 class ContentPipeline:

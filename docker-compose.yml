@@ -1,0 +1,114 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Ollama — servidor de inferencia LLM
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: thz-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Server — FastAPI + WebSocket + debate engine
+  # ---------------------------------------------------------------------------
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: thz-server
+    ports:
+      - "${PORT:-9983}:${PORT:-9983}"
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - thz-data:/app/data
+      - thz-sessions:/app/sessions
+      - thz-output:/app/output
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-9983}/docs"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Client — CLI interativo
+  # ---------------------------------------------------------------------------
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: thz-client
+    env_file:
+      - .env
+    environment:
+      - WS_URI=ws://server:${PORT:-9983}/ws/debate
+    volumes:
+      - thz-data:/app/data
+      - thz-sessions:/app/sessions
+    depends_on:
+      server:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+    profiles:
+      - interactive
+
+  # ---------------------------------------------------------------------------
+  # RAG — pipeline de embeddings
+  # ---------------------------------------------------------------------------
+  rag:
+    build:
+      context: .
+      dockerfile: Dockerfile.rag
+    container_name: thz-rag
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - thz-data:/app/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+    profiles:
+      - tools
+
+  # ---------------------------------------------------------------------------
+  # Training — fine-tuning QLoRA (job one-shot)
+  # ---------------------------------------------------------------------------
+  training:
+    build:
+      context: .
+      dockerfile: Dockerfile.training
+    container_name: thz-training
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - thz-data:/app/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+    profiles:
+      - tools
+
+volumes:
+  ollama-models:
+  thz-data:
+  thz-sessions:
+  thz-output:

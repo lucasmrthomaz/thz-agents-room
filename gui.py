@@ -10,7 +10,9 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, Scrollbar
 import websockets
 
-URI = "ws://127.0.0.1:8000/ws/debate"
+from config import settings as cfg
+
+URI = cfg.WS_URI
 
 # Cores do tema
 BG_DARK = "#1e1e2e"
@@ -488,7 +490,7 @@ class THZMainsApp:
         def load():
             import urllib.request
             try:
-                with urllib.request.urlopen("http://127.0.0.1:8000/api/teamwork/projects", timeout=5) as resp:
+                with urllib.request.urlopen(f"http://127.0.0.1:{cfg.PORT}/api/teamwork/projects", timeout=5) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                     projects = data.get("projects", [])
                     self.root.after(0, self._render_projects_history, projects)
@@ -565,7 +567,7 @@ class THZMainsApp:
         def load():
             import urllib.request
             import urllib.parse
-            url = f"http://127.0.0.1:8000/api/teamwork/file?project_id={urllib.parse.quote(project_id)}&file_path={urllib.parse.quote(file_path)}"
+            url = f"http://127.0.0.1:{cfg.PORT}/api/teamwork/file?project_id={urllib.parse.quote(project_id)}&file_path={urllib.parse.quote(file_path)}"
             try:
                 with urllib.request.urlopen(url, timeout=5) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
@@ -846,7 +848,7 @@ class THZMainsApp:
         from server import app
 
         def run():
-            uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
+            uvicorn.run(app, host="127.0.0.1", port=cfg.PORT, log_level="warning")
 
         self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
@@ -858,7 +860,7 @@ class THZMainsApp:
         """Verifica se o servidor esta rodando."""
         import urllib.request
         try:
-            req = urllib.request.urlopen("http://127.0.0.1:8000/docs", timeout=2)
+            req = urllib.request.urlopen(f"http://127.0.0.1:{cfg.PORT}/docs", timeout=2)
             if req.status == 200:
                 self.server_running = True
                 self.server_status.config(text="● Servidor online", fg=ACCENT_GREEN)
@@ -883,7 +885,7 @@ class THZMainsApp:
     async def _ws_loop(self):
         """Loop WebSocket."""
         try:
-            async with websockets.connect(URI) as ws:
+            async with websockets.connect(URI, ping_timeout=120, close_timeout=10) as ws:
                 self.ws = ws
                 self.connected = True
                 self.root.after(0, lambda: self.server_status.config(text="● Conectado", fg=ACCENT_GREEN))
@@ -992,7 +994,7 @@ class THZMainsApp:
                 }).encode("utf-8")
 
                 req = urllib.request.Request(
-                    "http://127.0.0.1:8000/api/teamwork/stream",
+                    f"http://127.0.0.1:{cfg.PORT}/api/teamwork/stream",
                     data=req_data,
                     headers={"Content-Type": "application/json"}
                 )

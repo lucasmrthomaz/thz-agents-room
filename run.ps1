@@ -86,6 +86,17 @@ function Start-Client {
     Write-Host "  [CLIENT] Turnos: $Turns | Ctx: $Ctx | Modelo: $modelo" -ForegroundColor Gray
     Write-Host ""
 
+    # Start server in background if not running
+    try {
+        $null = Invoke-WebRequest -Uri "http://127.0.0.1:9983/docs" -TimeoutSec 2 -ErrorAction Stop
+        Write-Host "  [SERVER] Servidor ja esta rodando." -ForegroundColor Gray
+    } catch {
+        Write-Host "  [SERVER] Iniciando servidor em background..." -ForegroundColor Yellow
+        $serverProc = Start-Process -FilePath "python" -ArgumentList "server.py" -PassThru -WindowStyle Minimized
+        Start-Sleep -Seconds 3
+        Write-Host "  [SERVER] Servidor iniciado (PID: $($serverProc.Id))" -ForegroundColor Gray
+    }
+
     $args = @("client.py", "--topic", $Topic, "--turns", $Turns, "--ctx", $Ctx)
     if ($Model) { $args += "--model"; $args += $Model }
     python @args
@@ -109,6 +120,17 @@ function Start-Autonomous {
     Write-Host "  [AUTONOMO] Resumo gerado ao final" -ForegroundColor Gray
     Write-Host "  [AUTONOMO] Ctrl+C para parar antecipadamente" -ForegroundColor Yellow
     Write-Host ""
+
+    # Start server in background if not running
+    try {
+        $null = Invoke-WebRequest -Uri "http://127.0.0.1:9983/docs" -TimeoutSec 2 -ErrorAction Stop
+        Write-Host "  [SERVER] Servidor ja esta rodando." -ForegroundColor Gray
+    } catch {
+        Write-Host "  [SERVER] Iniciando servidor em background..." -ForegroundColor Yellow
+        $serverProc = Start-Process -FilePath "python" -ArgumentList "server.py" -PassThru -WindowStyle Minimized
+        Start-Sleep -Seconds 3
+        Write-Host "  [SERVER] Servidor iniciado (PID: $($serverProc.Id))" -ForegroundColor Gray
+    }
 
     $args = @("client.py", "--autonomous", "--hours", $Hours, "--ctx", $Ctx)
     if ($Model) { $args += "--model"; $args += $Model }

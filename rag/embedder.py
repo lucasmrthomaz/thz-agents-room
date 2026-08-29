@@ -11,11 +11,13 @@ import httpx
 from typing import List, Optional, Dict
 from collections import OrderedDict
 
+from config import settings as cfg
+
 logger = logging.getLogger(__name__)
 
-OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
-DEFAULT_MODEL = "nomic-embed-text"
-EMBEDDING_DIM = 768
+OLLAMA_EMBED_URL = cfg.OLLAMA_EMBED_URL
+DEFAULT_MODEL = cfg.EMBEDDING_MODEL
+EMBEDDING_DIM = cfg.EMBEDDING_DIM
 
 
 class Embedder:

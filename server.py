@@ -2,7 +2,7 @@
 Multi-Agent Conversation Engine - Autonomous Mode
 Arquitetura: FastAPI + WebSockets + SQLite (thz-room-cortex.db) + Ollama
 
-8 Agentes: 5 Tecnicos + 3 de Negocio
+9 Agentes com identidade persistente, turnos dinamicos, e voting.
 Modos: Single (sob demanda) + Autonomous (sessao noturna)
 """
 
@@ -29,6 +29,9 @@ from pydantic import BaseModel, Field
 from stability.context_manager import ContextManager
 from stability.loop_detector import LoopDetector
 from stability.quality_monitor import QualityMonitor
+from stability.conversation_summarizer import ConversationSummarizer
+from stability.meta_moderator import MetaModerator
+from stability.speaker_selector import SpeakerSelector
 from rag.semantic_search import SemanticSearch
 from tools import get_tool_registry
 from export import ReportGenerator
@@ -43,20 +46,26 @@ from teamwork import (
 )
 from scenarios import get_scenario_engine
 
+# Identidade e memoria de agentes
+from agents.soul import AgentSoul
+from agents.memory import AgentMemory
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("ThzRoom")
 
-BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
-SESSIONS_DIR = BASE_DIR / "sessions"
-DB_PATH = DATA_DIR / "thz-room-cortex.db"
+from config import settings as cfg
 
-OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
-DEFAULT_MODEL = "qwen2.5:7b"
+BASE_DIR = Path(__file__).parent
+DATA_DIR = cfg.DATA_DIR
+SESSIONS_DIR = cfg.SESSIONS_DIR
+DB_PATH = cfg.DB_PATH
+
+OLLAMA_BASE_URL = cfg.OLLAMA_BASE_URL
+OLLAMA_CHAT_URL = cfg.OLLAMA_CHAT_URL
+DEFAULT_MODEL = cfg.DEFAULT_MODEL
 
 # =====================================================================
 # SHUTDOWN GRACEFUL
@@ -141,6 +150,10 @@ class AgentDecision(BaseModel):
     )
     status: Literal["CONTINUE", "CONSENSUS", "FORCE_STOP"] = Field(
         description="CONTINUE para manter a discusao; CONSENSUS quando concordar com a maioria dos pontos principais; FORCE_STOP quando o sistema forca parada."
+    )
+    vote: Literal["agree", "disagree", "abstain"] = Field(
+        default="abstain",
+        description="Voto do agente: 'agree' se concorda com o argumento anterior, 'disagree' se discorda, 'abstain' se neutro."
     )
     question_to: Optional[str] = Field(
         default=None,
@@ -965,40 +978,48 @@ async def generate_topic(model: str, history_topics: List[str]) -> str:
         "options": {"temperature": 0.9, "num_ctx": 1024}
     }
 
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=90.0)
-            resp.raise_for_status()
-            raw = resp.json()["message"]["content"]
+    MAX_RETRIES = 2
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(OLLAMA_CHAT_URL, json=payload, timeout=90.0)
+                resp.raise_for_status()
+                raw = resp.json()["message"]["content"]
 
-            try:
-                data = json.loads(raw)
-                topic = data.get("topic", "").strip()
-            except json.JSONDecodeError:
-                topic = raw.strip().strip('"').strip("'").strip()
+                try:
+                    data = json.loads(raw)
+                    topic = data.get("topic", "").strip()
+                except json.JSONDecodeError:
+                    topic = raw.strip().strip('"').strip("'").strip()
 
-            if 10 <= len(topic) <= 150 and not topic.startswith("{"):
-                if is_too_similar(topic, history_topics[-30:]):
-                    logger.warning(f"[TOPICOS] Similar demais: {topic[:60]}...")
+                if 10 <= len(topic) <= 150 and not topic.startswith("{"):
+                    if is_too_similar(topic, history_topics[-30:]):
+                        logger.warning(f"[TOPICOS] Similar demais: {topic[:60]}...")
+                        if attempt < MAX_RETRIES:
+                            continue
+                        if available := [t for t in FALLBACK_TOPICS
+                                         if not is_too_similar(t, history_topics[-30:])]:
+                            return random.choice(available)
+                        return topic
+                    logger.info(f"[TOPICOS] Ollama: {topic}")
+                    return topic
+                else:
+                    logger.warning(f"[TOPICOS] Invalido (attempt {attempt + 1}): raw={raw[:100]!r}, parsed={topic[:80]!r}")
+                    if attempt < MAX_RETRIES:
+                        continue
                     if available := [t for t in FALLBACK_TOPICS
                                      if not is_too_similar(t, history_topics[-30:])]:
                         return random.choice(available)
-                    return topic
-                logger.info(f"[TOPICOS] Ollama: {topic}")
-                return topic
-            else:
-                logger.warning(f"[TOPICOS] Invalido: {topic[:80]}...")
-                if available := [t for t in FALLBACK_TOPICS
-                                 if not is_too_similar(t, history_topics[-30:])]:
-                    return random.choice(available)
-                return random.choice(FALLBACK_TOPICS)
+                    return random.choice(FALLBACK_TOPICS)
 
-    except Exception as e:
-        logger.error(f"[TOPICOS] Erro ao gerar: {e}")
-        if available := [t for t in FALLBACK_TOPICS
-                         if not is_too_similar(t, history_topics[-30:])]:
-            return random.choice(available)
-        return random.choice(FALLBACK_TOPICS)
+        except Exception as e:
+            logger.error(f"[TOPICOS] Erro ao gerar (attempt {attempt + 1}): {e}")
+            if attempt < MAX_RETRIES:
+                continue
+            if available := [t for t in FALLBACK_TOPICS
+                             if not is_too_similar(t, history_topics[-30:])]:
+                return random.choice(available)
+            return random.choice(FALLBACK_TOPICS)
 
 async def generate_summary(model: str, topics: List[Dict]) -> str:
     """Gera resumo da sessao de debates."""
@@ -1147,93 +1168,246 @@ DEFAULT_AGENT_MODELS = {
     "Dev Senior": None,
 }
 
+# =====================================================================
+# 6.1 PERSONAS PROFUNDAS (Pilar 10 + Pilar 6)
+# =====================================================================
+
+AGENT_PERSONAS = {
+    "Arquiteto": {
+        "biography": (
+            "Sou o Marco, arquiteto com 15 anos em sistemas distribuidos. "
+            "Comecei como dev backend e migrei para arquitetura depois de ver "
+            "um monolito de 2M de linhas colapsar em Black Friday. "
+            "Falo pouco, mas quando falo, trago dados. Minha frase: "
+            "'A melhor arquitetura e a que voce nao precisa explicar.'"
+        ),
+        "speech_style": "direto, usa metforas de construcao civil, sempre com numeros",
+        "disagreement_style": "educado mas firme — comeca reconhecendo o ponto valido antes da ressalva",
+        "temperature": 0.3,
+        "repeat_penalty": 1.3,
+        "few_shot": [
+            "O ponto do SRE sobre SPOF e valido, mas o custo de replicacao em 3 zonas "
+            "e de ~$450/mes. Para uma startup com 10k usuarios, isso e 15% do orcamento. "
+            "Existe uma solucao mais leve: health checks a cada 30s + failover automatico.",
+            "Concordo com a proposta de microservicos, mas o YAGNI se aplica: "
+            "se o time tem 3 devs, monolito modular e mais maintainavel que 8 servicos."
+        ]
+    },
+    "SRE": {
+        "biography": (
+            "Sou a Ana, SRE ha 10 anos. Ja acordei 3am por alerta falso e ja perdi "
+            "fim de semana por SPOF escondido. Minha obsessor: zero downtime. "
+            "Falo de tolerancia a falhas como quem fala de saude — prevencao > cura."
+        ),
+        "speech_style": "analitico, sempre com SLAs e metricas, usa exemplos de incidentes reais",
+        "disagreement_style": "direto — aponta risco sem rodeios, mas propoe solucao",
+        "temperature": 0.4,
+        "repeat_penalty": 1.2,
+        "few_shot": [
+            "A proposta do Arquiteto e elegante, mas ignora um SPOF: se o load balancer "
+            "cair, todo o trafego vai para um unico node. SLA 99.9% exige redundancia "
+            "em camadas. Sugestao: ELB + Auto Scaling Group com min 2.",
+            "Concordo que observabilidade e critica. Prometheus + Grafana resolve 80% "
+            "dos casos. Para os outros 20%, Jaeger para tracing distribuido."
+        ]
+    },
+    "DevOps": {
+        "biography": (
+            "Sou o Carlos, DevOps desde antes do Kubernetes existir. Ja fiz deploy "
+            "manual de 200 servidores. Hoje automatizo tudo que posso. "
+            "Minha frase: 'Se e repetivel, automatize. Se nao e, documente.'"
+        ),
+        "speech_style": "pratico, foca em implementacao, sempre com ferramentas especificas",
+        "disagreement_style": "colaborativo — questiona viabilidade, nao a ideia",
+        "temperature": 0.4,
+        "repeat_penalty": 1.2,
+        "few_shot": [
+            "A solucao do DBA e solida, mas o pipeline de migracao precisa de "
+            "rollback automatico. Sugestao: Flyway com checksum validation + "
+            "blue-green deployment. Tempo estimado: 2h para setup inicial.",
+            "CI/CD com GitHub Actions resolve, mas cuidado com secrets. "
+            "Use OIDC para AWS/GCP em vez de static keys."
+        ]
+    },
+    "DBA": {
+        "biography": (
+            "Sou a Maria, DBA ha 12 anos. Ja otimizei query que levava 47min "
+            "para 200ms. Falo de dados como falo de filosofia: "
+            "'Dados sem modelo e barulho. Modelo sem dados e teoria.'"
+        ),
+        "speech_style": "detalhista, sempre com EXPLAIN ANALYZE, normalizacao e indices",
+        "disagreement_style": "tecnico — discorda com dados, nao com pessoa",
+        "temperature": 0.3,
+        "repeat_penalty": 1.3,
+        "few_shot": [
+            "O SRE tem razao sobre redundancia, mas no nivel de dados, "
+            "replicacao assincrona tem lag de ~100ms. Para consistencia forte, "
+            "sincrona e necessaria — e isso custa latencia. Decidam o tradeoff.",
+            "Indices como o Dev Senior sugere ajudam, mas CUIDADO: "
+            "index em tabela com 50M de linhas aumenta INSERT em 3x."
+        ]
+    },
+    "Security": {
+        "biography": (
+            "Sou o Lucas, especialista em seguranca. Ja encontrei SQL injection "
+            "em producao e ja expliquei para CEO por que ransomware e grave. "
+            "Minha regra: 'Seguranca nao e feature, e requisito.'"
+        ),
+        "speech_style": "cauteloso, sempre com OWASP, CVEs e exemplos de brechas reais",
+        "disagreement_style": "firme — seguranca nao e opcional, mas propoe alternativas",
+        "temperature": 0.3,
+        "repeat_penalty": 1.3,
+        "few_shot": [
+            "A API do PO e funcional, mas expoe PII em logs. GDPR multa ate "
+            "4% do faturamento. Sugestao: mascarar CPF/email em logs usando "
+            "structlog com processors de sanitizacao.",
+            "Autenticacao com JWT e OK, mas sem refresh token, sessao expira "
+            "e usuario perde trabalho. Use rotation a cada 15min."
+        ]
+    },
+    "PO": {
+        "biography": (
+            "Sou a Julia, Product Owner. Ja vi feature de $200k ser cancelada "
+            "por falta de validacao com usuario. Falo de negocio como "
+            "'Codigo sem valor e desperdicio de CPU.'"
+        ),
+        "speech_style": "estrategico, sempre com ROI,用户impacto e priorizacao",
+        "disagreement_style": "colaborativo — questiona valor, nao tecnica",
+        "temperature": 0.6,
+        "repeat_penalty": 1.15,
+        "few_shot": [
+            "A solucao tecnica e solida, mas qual o impacto no usuario? "
+            "Se 80% dos usuarios usam so leitura, otimizar escrita e "
+            "desperdicio priorizar leitura primeiro.",
+            "Concordo com Security sobre LGPD, mas precisamos de POC "
+            "em 2 semanas. Qual o custo minimo de implementacao?"
+        ]
+    },
+    "Scrum Master": {
+        "biography": (
+            "Sou o Pedro, Scrum Master. Ja vi sprint de 2 semanas virar "
+            "1 mes de deadlock. Minha missao: desbloquear times. "
+            "Falo: 'Processo sem resultado e burocracia.'"
+        ),
+        "speech_style": "processual, foca em fluxo, impedimentos e entregas",
+        "disagreement_style": "suave — questiona processos, nao pessoas",
+        "temperature": 0.5,
+        "repeat_penalty": 1.15,
+        "few_shot": [
+            "A proposta do Gerente e ambiciosa, mas o time tem capacidade "
+            "para 40 story points/sprint. Se aumentarmos, burnout e garantido. "
+            "Sugestao: priorizar backlog com MoSCoW.",
+            "DevOps e SQE deviam trabalhar juntos — CI/CD compartilhado "
+            "reduz overhead de comunicacao em 60%."
+        ]
+    },
+    "Gerente": {
+        "biography": (
+            "Sou a Fernanda, Gerente de Projeto. Ja gerenciei budget de $2M "
+            "e ja tive que cortar 30% sem perder deadline. "
+            "Falo: 'Recursos sao finitos. Escopo infinito. Alguem cede.'"
+        ),
+        "speech_style": "estrategico, sempre com timeline, riscos e orcamento",
+        "disagreement_style": "diplomatico — equilibra expectativas vs realidade",
+        "temperature": 0.5,
+        "repeat_penalty": 1.15,
+        "few_shot": [
+            "Solucao tecnica e viavel, mas prazo de 3 meses e realista? "
+            "Com 2 devs, estimativa e 5 meses. Opcoes: contratar ou reduzir escopo.",
+            "Security quer WAF + SIEM. Custo: ~$3k/mes. ROI: evita multa "
+            "de $500k. Aprovado, mas implementar em fases."
+        ]
+    },
+    "Dev Senior": {
+        "biography": (
+            "Sou o Ricardo, dev senior ha 8 anos. Ja mantive legado de 15 anos "
+            "e ja refatorei monolito para microservicos. "
+            "Falo: 'Codigo limpo nao e bonito, e maintainavel.'"
+        ),
+        "speech_style": "tecnico, sempre com SOLID, design patterns e testes",
+        "disagreement_style": "construtivo — aponta code smell, propoe refactor",
+        "temperature": 0.4,
+        "repeat_penalty": 1.25,
+        "few_shot": [
+            "A solucao do Arquiteto funciona, mas viola SRP: a classe "
+            "UserManager faz CRUD + auth + logging. Sugestao: separar em "
+            "3 servicos com interface unica.",
+            "Testes sao criticos. Para essa funcionalidade, sugiro: "
+            "unit (pytest) + integration (testcontainers) + E2E (playwright)."
+        ]
+    },
+}
+
 
 def create_agents(model: str, agent_models: dict = None) -> list:
-    """Cria os 9 agentes com o modelo especificado.
+    """Cria os 9 agentes com personas profundas e identidade persistente.
     
     Args:
-        model: Modelo padrão para todos os agentes
+        model: Modelo padrao para todos os agentes
         agent_models: Dict opcional {nome_agente: modelo} para override por agente
     """
-    configs = [
-        ("Arquiteto", "Software Architect",
-         "Voce e um arquiteto de software pragmatico focado em simplicidade, "
-         "manutenibilidade e custo de infraestrutura (KISS / YAGNI). "
-         "Defenda abordagens diretas e desafie complexidade acidental."),
-        ("SRE", "Site Reliability Engineer",
-         "Voce e um SRE focado em tolerancia a falhas, sistemas distribuidos, "
-         "concorrencia, picos de carga e observabilidade. "
-         "Identifique SPOF, locks de banco e gargalos de escalabilidade."),
-        ("DevOps", "DevOps Engineer",
-         "Voce e um DevOps focado em CI/CD, infraestrutura como codigo, "
-         "automacao, containers e monitoramento. "
-         "Question complexidade de pipelines e custos de infra."),
-        ("DBA", "Database Specialist",
-         "Voce e um especialista em bancos de dados focado em modelagem relacional, "
-         "normalizacao, performance de queries, indexes e concorrencia. "
-         "Question escolhas de NoSQL quando o problema e relacional."),
-        ("Security", "Security Specialist",
-         "Voce e um especialista em seguranca focado em vulnerabilidades, "
-         "autenticacao, autorizacao e boas praticas. "
-         "Aponte riscos de injecao, exposicao de dados e autenticacao fraca."),
-        ("PO", "Product Owner",
-         "Voce e um Product Owner focado em valor de negocio, ROI, "
-         "priorizacao e alinhamento com objetivos estrategicos. "
-         "Question se a solucao tecnica atende ao usuario final."),
-        ("Scrum Master", "Scrum Master",
-         "Voce e um Scrum Master focado em processo, impedimentos "
-         "e fluxo de trabalho. Identifique gargalos de comunicacao."),
-        ("Gerente", "Project Manager",
-         "Voce e um Gerente de Projeto focado em prazo, recursos, "
-         "riscos e orcamento. Aponte impacto em timeline e capacidade da equipe."),
-        ("Dev Senior", "Senior Developer",
-         "Voce e um desenvolvedor senior experiente focado em codigo limpo, "
-         "padroes de design, SOLID, testes unitarios e boas praticas de programacao. "
-         "Question code smells, gaps de testes e violacoes de principios SOLID."),
-    ]
-
     agents = []
-    for name, role, prompt in configs:
-        # Usar modelo por agente se configurado, senão usar o global
+    data_dir = Path(__file__).parent / "data"
+
+    for name, persona in AGENT_PERSONAS.items():
         agent_model = (agent_models or {}).get(name) or model
+
+        # Carregar identidade persistente (Pilar 6)
+        soul = AgentSoul(name, data_dir)
+        memory = AgentMemory(name, data_dir)
+
+        # Montar system prompt com persona profunda
+        few_shot_text = "\n".join(
+            f"  - \"{ex}\"" for ex in persona.get("few_shot", [])
+        )
+
+        system_prompt = (
+            f"IDENTIDADE:\n{persona['biography']}\n\n"
+            f"ESTILO DE FALA: {persona['speech_style']}\n"
+            f"ESTILO DE DISCORDANCIA: {persona['disagreement_style']}\n\n"
+            f"EXEMPLOS DE ARGUMENTOS BONS:\n{few_shot_text}\n\n"
+            "DIRETIVAS OBRIGATORIAS:\n"
+            "- Idioma: Responda EXCLUSIVAMENTE em Portugues do Brasil (pt-BR).\n"
+            "- Formato: Responda estritamente no esquema JSON com 'argument', 'status', 'vote', 'question_to' e 'reasoning'.\n"
+            "- VOTO: Use 'vote': 'agree' se concorda com o argumento anterior, 'disagree' se discorda, 'abstain' se neutro.\n"
+            "- RACIOCINIO: Preencha 'reasoning' com sua analise interna antes de responder.\n"
+            "- PERGUNTAS: Se tiver DUVIDA sobre argumento de outro agente, use 'question_to' com o nome dele.\n"
+            "- ORIGINALIDADE: Traga argumentos COMPLETAMENTE NOVOS baseados na sua expertise.\n"
+            "- DADOS CONCRETOS: Traga numeros, metricas, ferramentas especificas, limites reais.\n"
+            "- SUA ROLE: Fale APENAS sobre sua area de expertise. NAO discuta topicos de outros agentes.\n"
+            "- ANTI-CONFORMIDADE: NAO concorde automaticamente. Seja o advogado do diabo quando necessario.\n"
+            f"{RESPECT_RULES}"
+        )
+
+        # Injetar identidade persistente se existir
+        if soul.exists():
+            personality = soul.get_personality_summary()
+            if personality:
+                system_prompt += f"\n\n{personality}"
+
+        semantic = memory.get_semantic_summary()
+        if semantic:
+            system_prompt += f"\n\n{semantic}"
+
         agent = type("AsyncAgent", (), {
             "name": name,
-            "role_title": role,
-            "system_prompt": (
-                f"{prompt}\n\n"
-                "DIRETIVAS OBRIGATORIAS:\n"
-                "- Idioma: Responda EXCLUSIVAMENTE em Portugues do Brasil (pt-BR).\n"
-                "  PROIBIDO: chines, japones, arabe, coreano, russo, ou qualquer idioma que nao seja portugues.\n"
-                "  Se voce gerar texto em outro idioma, o debate sera ENCERRADO IMEDIATAMENTE.\n"
-                "- Formato: Responda estritamente no esquema JSON com 'argument', 'status', 'question_to' e 'reasoning'.\n"
-                "- RACIOCINIO: Preencha 'reasoning' com sua analise interna antes de responder.\n"
-                "  Analise: 1) O que foi dito, 2) Dados concretos, 3) Se concorda com a maioria, 4) O que falta mencionar.\n"
-                "- PERGUNTAS: Se tiver DUVIDA sobre argumento de outro agente, use 'question_to' com o nome dele.\n"
-                "  Formato: question_to = 'NomeDoAgente'. O agente sera instruido a responder sua pergunta.\n"
-                "- PLAGIO ABSOLUTAMENTE PROIBIDO: NAO copie, NAO repita, NAO parafraseie trechos de outros agentes.\n"
-                "  Se voce copiar, o debate sera encerrado imediatamente.\n"
-                "- ORIGINALIDADE: Traga argumentos COMPLETAMENTE NOVOS baseados na sua expertise.\n"
-                "  Cada resposta deve conter ideias que NAO foram mencionadas por ninguem antes.\n"
-                "- DADOS CONCRETOS: Traga numeros, metricas, exemplos reais, fonts especificas.\n"
-                "- SUA ROLE: Fale APENAS sobre sua area de expertise. NAO discuta topicos de outros agentes.\n"
-                "- CONSENSUS: Responda 'CONSENSUS' quando:\n"
-                "  1) Voce concorda com a maioria dos pontos principais do debate\n"
-                "  2) Os argumentos principais ja foram apresentados e discutidos\n"
-                "  3) Nao ha objecoes criticas restantes\n"
-                "  Nao e necessario concordar com TUDO. Basta concordar com o GERAL.\n"
-                "  Se 3 ou mais agentes ja concordaram, considere seriamente CONSENSUS.\n"
-                f"{RESPECT_RULES}"
-            ),
+            "role_title": persona["biography"].split(",")[0].replace("Sou o ", "").replace("Sou a ", "").strip(),
+            "system_prompt": system_prompt,
             "model": agent_model,
+            "temperature": persona.get("temperature", 0.5),
+            "repeat_penalty": persona.get("repeat_penalty", 1.2),
+            "soul": soul,
+            "memory": memory,
         })()
         agents.append(agent)
+
     return agents
 
 # =====================================================================
 # 7. ORQUESTRADOR (FSM)
 # =====================================================================
 
-CONSENSUS_THRESHOLD = 4  # Maioria simples de 9 agentes para consenso
+CONSENSUS_THRESHOLD = cfg.CONSENSUS_THRESHOLD  # Maioria simples de 9 agentes para voting
 
 def _is_repetitive(arguments: list, threshold: float = 0.65) -> bool:
     """Detecta espiral de repeticao no debate.
@@ -1357,7 +1531,7 @@ def _is_valid_portuguese(text: str) -> bool:
 
 class MultiAgentEngine:
     def __init__(self, agents: list, num_ctx: int = 8192, max_turns: int = 48,
-                 min_turns: int = 2):
+                 min_turns: int = 2, model: str = None):
         self.agents = agents
         self.num_ctx = num_ctx
         self.max_turns = max_turns
@@ -1367,14 +1541,22 @@ class MultiAgentEngine:
         self.loop_detector = LoopDetector()
         self.quality_monitor = QualityMonitor()
         self.semantic_search = SemanticSearch()
+        # Novos modulos (Pilares 1, 2, 5) - usar modelo do debate
+        effective_model = model or DEFAULT_MODEL
+        self.summarizer = ConversationSummarizer(effective_model, summary_model="qwen3.5:9b")
+        self.moderator = MetaModerator(effective_model)
+        self.speaker_selector = SpeakerSelector(effective_model)
 
     async def execute_debate(self, conversation_id: str, topic: str, websocket: WebSocket,
                              session_id: str = None):
         await CortexDB.save_conversation(conversation_id, topic, session_id)
         history: List[Dict[str, str]] = []
         current_turn = 0
-        consecutive_consensus = 0
         last_consensus = False
+
+        # Reset moderators
+        self.moderator.reset()
+        self.speaker_selector.reset()
 
         # Recuperar conhecimento relevante de debates anteriores
         prior_knowledge = await CortexDB.retrieve_knowledge(topic, limit=3)
@@ -1413,19 +1595,30 @@ class MultiAgentEngine:
         except Exception:
             all_agent_skills = {}
 
-        # Lista de perguntas pendentes entre agentes
-        pending_questions = []
-
         # Auto-expand num_ctx se necessario
-        estimated_tokens = self.context_manager.estimate_tokens(topic) + 500  # overhead
+        estimated_tokens = self.context_manager.estimate_tokens(topic) + 500
         self.num_ctx = self.context_manager.auto_expand(estimated_tokens)
 
         # Health monitoring
-        health = {"diversity_score": 1.0, "trend": "diverging", "repetition_count": 0, "plagiarism_count": 0}
+        health = {"diversity_score": 1.0, "trend": "diverging", "repetition_count": 0,
+                  "plagiarism_count": 0, "conformity_count": 0}
+
+        last_speaker = None
 
         async with httpx.AsyncClient() as http_client:
             while current_turn < self.max_turns:
-                for agent in self.agents:
+                # ── SELECAO DINAMICA DE FALANTES (Pilar 2) ──
+                next_speakers = await self.speaker_selector.select_next_speakers(
+                    self.agents, history, current_turn,
+                    max_speakers=3,
+                    pending_questions=self.speaker_selector.question_queue,
+                )
+
+                for agent_name in next_speakers:
+                    agent = next((a for a in self.agents if a.name == agent_name), None)
+                    if not agent:
+                        continue
+
                     current_turn += 1
 
                     await websocket.send_json({
@@ -1433,9 +1626,15 @@ class MultiAgentEngine:
                         "data": {"turn": current_turn, "agent": agent.name, "role": agent.role_title}
                     })
 
-                    # Trunc inteligente do transcript
-                    truncated_history = self.context_manager.truncate_intelligently(history, self.num_ctx - 1000)
-                    transcript = [f"[{h['author']} - Turno {h['turn']}]: {h['content']}" for h in truncated_history]
+                    # ── RESUMO EM VEZ DE TRANSCRIPT BRUTO (Pilar 1) ──
+                    discussion_summary = await self.summarizer.get_or_create_summary(
+                        history, current_turn, interval=3
+                    )
+                    last_arg_context = self.summarizer.get_last_argument_context(history)
+
+                    # Transcript compacto (nao o texto inteiro)
+                    transcript = f"## Resumo da Discussao\n{discussion_summary}\n\n"
+                    transcript += f"## Contexto Imediato\n{last_arg_context}\n\n"
 
                     if current_turn == 1:
                         instruction = (
@@ -1451,26 +1650,14 @@ class MultiAgentEngine:
                             "Traga uma analise COMPLETAMENTE NOVA com dados da sua area de expertise."
                         )
 
-                    # Consenso forçado nos últimos turnos
-                    turns_remaining = self.max_turns - current_turn
-                    if turns_remaining <= 3 and current_turn >= self.min_turns:
-                        instruction += (
-                            "\n\nIMPORTANTE: O debate esta terminando. Se concordar com a maioria "
-                            "dos pontos principais, responda CONSENSUS. Nao e necessario concordar com tudo."
-                        )
-                    elif current_turn > self.min_turns:
-                        # Após min_turns, instruir a considerar consenso
-                        consensus_count = sum(
-                            1 for h in history[-9:]
-                            if h.get("status") == "CONSENSUS"
-                        )
-                        if consensus_count >= 2:
-                            instruction += (
-                                f"\n\nNOTA: {consensus_count} agentes ja concordaram. "
-                                "Se voce tambem concorda com os pontos principais, responda CONSENSUS."
-                            )
+                    # ── ANTI-CONFORMIDADE (Pilar 7) ──
+                    anti_conform = self.loop_detector.get_anti_conformity_instruction(
+                        health, agent.role_title
+                    )
+                    if anti_conform:
+                        instruction += anti_conform
 
-                    # Knowledge context via RAG (substitui busca por substring)
+                    # Knowledge context via RAG
                     try:
                         rag_context = await self.semantic_search.construir_knowledge_context(
                             topic, agent.name, history
@@ -1495,29 +1682,23 @@ class MultiAgentEngine:
                         )
                         agent_specific_context += f"\n\n## Suas areas de expertise (baseado em debates anteriores):\n{skills_text}\n"
 
-                    # Injetar peso de voto do agente
-                    vote_weight = await calculate_vote_weight(agent.name, all_agent_skills)
-                    agent_specific_context += f"\n\nSeu peso de voto: {vote_weight:.1f} (baseado na sua expertise).\n"
-
-                    # Pergunta pendente de outro agente
-                    pending_question = next(
-                        (q for q in pending_questions if q["to"] == agent.name),
-                        None
-                    )
+                    # ── PERGUNTA PENDENTE ──
+                    pending_question = self.speaker_selector.get_pending_questions(agent.name)
                     if pending_question:
                         agent_specific_context += (
                             f"\n\n## PERGUNTA DE {pending_question['from']}:\n"
                             f"{pending_question['question']}\n"
-                            f"Responda diretamente a essa pergunta. Se satisfatoria, considere CONSENSUS.\n"
+                            f"Responda diretamente a essa pergunta.\n"
                         )
+                        self.speaker_selector.clear_answered_question(agent.name)
 
                     user_prompt = (
                         f"Topico da Discusao: {topic}\n\n"
-                        f"Historico:\n" + ("\n".join(transcript) if transcript else "Inicio do debate.") +
-                        f"\n\n{agent_specific_context}\n"
+                        f"{transcript}"
+                        f"\n{agent_specific_context}\n"
                         f"\n{instruction}\n"
                         f"Status: 'CONTINUE' para contra-argumentar; 'CONSENSUS' quando concordar com a maioria dos pontos principais.\n"
-                        f"IMPORTANTE: Apos {self.min_turns} turnos, se voce concorda com o geral, digite CONSENSUS."
+                        f"Vote: 'agree' se concorda com o argumento anterior, 'disagree' se discorda, 'abstain' se neutro.\n"
                     )
 
                     payload = {
@@ -1529,8 +1710,8 @@ class MultiAgentEngine:
                         "stream": False,
                         "format": AgentDecision.model_json_schema(),
                         "options": {
-                            "temperature": 0.5,
-                            "repeat_penalty": 1.15,
+                            "temperature": agent.temperature,
+                            "repeat_penalty": agent.repeat_penalty,
                             "num_ctx": self.num_ctx
                         }
                     }
@@ -1592,8 +1773,17 @@ class MultiAgentEngine:
                     if len(history) >= 5:
                         recent_args = [h["content"] for h in history[-5:]]
                         if _is_repetitive(recent_args):
-                            effective_status = "FORCE_STOP"
-                            logger.info(f"[REPETITION] Turno {current_turn}: espiral de repeticao detectada")
+                            # Em vez de FORCE_STOP, redirecionar (Pilar 7)
+                            instruction += (
+                                "\n\n🔄 REDIRECIONAMENTO: O debate esta circular. "
+                                "Para avancar, voce deve:\n"
+                                "1. Identificar um aspecto NAO abordado por ninguem\n"
+                                "2. Trazer um dado concreto da SUA area de expertise\n"
+                                "3. Ou concordar com CONSENSUS se nao tiver algo novo\n"
+                                "NAO repita argumentos existentes."
+                            )
+                            effective_status = "CONTINUE"
+                            logger.info(f"[REPETITION] Turno {current_turn}: redirecionamento emitido")
 
                     # Deteccao de plagio
                     if len(history) >= 1 and _is_plagiarized(decision.argument, history):
@@ -1605,11 +1795,35 @@ class MultiAgentEngine:
                         effective_status = "FORCE_STOP"
                         logger.info(f"[LANGUAGE] Turno {current_turn}: texto nao-portugues detectado")
 
-                    # Health monitoring (loop detector)
+                    # Health monitoring (loop detector com anti-conformidade)
                     health = self.loop_detector.analyze_debate_health(history)
-                    if self.loop_detector.should_end_debate(health, current_turn, self.min_turns):
+                    force_action = self.loop_detector.should_force_action(health)
+                    if force_action == "force_disagreement":
+                        # Nao parar, apenas injetar instrucao anti-conformidade
+                        logger.info(f"[HEALTH] Turno {current_turn}: anti-conformidade forçada")
+                    elif force_action == "force_vote":
+                        effective_status = "CONSENSUS"
+                        logger.info(f"[HEALTH] Turno {current_turn}: voting forçado")
+                    elif force_action == "redirect_topic":
+                        instruction += (
+                            "\n\n🔄 Topico estagnado. Traça uma NOVA PERSPECTIVA "
+                            "baseada na sua expertise."
+                        )
+                    elif force_action == "end_debate":
                         effective_status = "FORCE_STOP"
-                        logger.info(f"[HEALTH] Turno {current_turn}: {health['recommendation']} (diversity={health['diversity_score']:.2f})")
+                        logger.info(f"[HEALTH] Turno {current_turn}: debate encerrado")
+
+                    # ── MODERADOR META-COGNITIVO (Pilar 5) ──
+                    if current_turn >= self.min_turns:
+                        mod_decision = await self.moderator.should_continue(
+                            history, health, current_turn
+                        )
+                        if mod_decision["action"] == "finalize":
+                            effective_status = "FORCE_STOP"
+                            logger.info(f"[MODERATOR] Finalizando: {mod_decision['reason']}")
+                        elif mod_decision["action"] == "force_vote":
+                            effective_status = "CONSENSUS"
+                            logger.info(f"[MODERATOR] Forçando voting: {mod_decision['reason']}")
 
                     # Quality monitoring
                     quality = self.quality_monitor.monitor_argument_quality(
@@ -1641,16 +1855,21 @@ class MultiAgentEngine:
                     await CortexDB.save_message(
                         conversation_id, agent.name, decision.argument, effective_status, current_turn
                     )
-                    history.append({"author": agent.name, "content": decision.argument, "turn": current_turn})
 
-                    # Processar pergunta para outro agente
+                    # ── HISTORICO COM VOTO (Pilar 4) ──
+                    history.append({
+                        "author": agent.name,
+                        "content": decision.argument,
+                        "turn": current_turn,
+                        "status": effective_status,
+                        "vote": getattr(decision, "vote", "abstain"),
+                    })
+
+                    # ── PERGUNTAS VIA SPEAKER SELECTOR ──
                     if decision.question_to and decision.question_to != agent.name:
-                        pending_questions.append({
-                            "from": agent.name,
-                            "to": decision.question_to,
-                            "question": decision.argument,
-                            "turn": current_turn
-                        })
+                        self.speaker_selector.add_question(
+                            agent.name, decision.question_to, decision.argument
+                        )
                         logger.info(f"[QUESTION] Turno {current_turn}: {agent.name} perguntou para {decision.question_to}")
 
                     # Auto-indexar embedding da mensagem (RAG) - apenas a cada 10 turnos
@@ -1658,7 +1877,7 @@ class MultiAgentEngine:
                         try:
                             await self.semantic_search.indexar_argumentos_pendentes()
                         except Exception:
-                            pass  # Non-critical
+                            pass
 
                     # Atualizar skills do agente se contribuiu para consenso
                     if effective_status == "CONSENSUS":
@@ -1666,6 +1885,18 @@ class MultiAgentEngine:
                             await CortexDB.update_agent_skills(agent.name, topic, True)
                         except Exception:
                             pass
+
+                    # ── SALVAR MEMORIA DO AGENTE (Pilar 6) ──
+                    try:
+                        agent.memory.record_episode(
+                            topic=topic,
+                            outcome=effective_status,
+                            my_argument=decision.argument[:300],
+                            turn=current_turn,
+                            consensus=(effective_status == "CONSENSUS"),
+                        )
+                    except Exception:
+                        pass
 
                     # Auto-salvar estado do debate a cada 5 turnos
                     if current_turn % 5 == 0:
@@ -1683,14 +1914,15 @@ class MultiAgentEngine:
                             "agent": agent.name,
                             "role": agent.role_title,
                             "argument": decision.argument,
-                            "status": effective_status
+                            "status": effective_status,
+                            "vote": getattr(decision, "vote", "abstain"),
                         }
                     })
 
-                    if effective_status == "CONSENSUS":
-                        consecutive_consensus += 1
-                        last_consensus = True
-                    elif effective_status == "FORCE_STOP":
+                    last_speaker = agent.name
+
+                    # ── VOTING EM VEZ DE CONSENSUS CONSECUTIVO (Pilar 4) ──
+                    if effective_status == "FORCE_STOP":
                         # FORCE_STOP: sistema forcou parada, encerrar debate
                         logger.info(f"[FORCE_STOP] Turno {current_turn}: debate encerrado por sistema")
                         summary_short = await generate_debate_summary(
@@ -1709,59 +1941,37 @@ class MultiAgentEngine:
                             }
                         })
                         return False, summary_short, summary_full
-                    else:
-                        consecutive_consensus = 0
-                        last_consensus = False
 
-                    if consecutive_consensus >= CONSENSUS_THRESHOLD and current_turn >= self.min_turns:
-                        # Verificar se consenso requer aprovação humana
-                        topic_context = {"times_discussed": topic_history.get("times_discussed", 0) if topic_history else 0}
-                        needs_human = await requires_human_approval(ActionType.CONSENSUS, topic_context)
+                    # ── VOTING: Maioria simples (5 de 9) ──
+                    if current_turn >= self.min_turns:
+                        votes_agree = sum(
+                            1 for h in history[-9:]
+                            if h.get("vote") == "agree" or h.get("status") == "CONSENSUS"
+                        )
+                        votes_disagree = sum(
+                            1 for h in history[-9:]
+                            if h.get("vote") == "disagree"
+                        )
 
-                        if needs_human:
-                            # Enviar evento de validação humana
+                        # Maioria simples para voting
+                        if votes_agree >= CONSENSUS_THRESHOLD:
+                            # Usar moderator para sintetizar
+                            summary_short = await self.moderator.synthesize_final(history, topic)
+                            summary_full = await generate_full_summary(
+                                self.agents[0].model, topic, history, summary_short, True
+                            )
                             await websocket.send_json({
-                                "event": "human_validation_required",
+                                "event": "debate_complete",
                                 "data": {
-                                    "type": "consensus_reached",
-                                    "topic": topic,
+                                    "reason": "voting_consensus",
                                     "total_turns": current_turn,
-                                    "message": "Consenso atingido. Aguardando aprovação do humano para finalizar."
+                                    "summary": summary_short,
+                                    "summary_full": summary_full,
+                                    "votes_agree": votes_agree,
+                                    "votes_disagree": votes_disagree,
                                 }
                             })
-                            # Aguardar resposta do humano (timeout 60s)
-                            try:
-                                import asyncio
-                                response = await asyncio.wait_for(websocket.receive_json(), timeout=60.0)
-                                if not response.get("approved", False):
-                                    # Humano rejeitou — continuar debate
-                                    consecutive_consensus = 0
-                                    last_consensus = False
-                                    logger.info(f"[HUMAN] Turno {current_turn}: consenso rejeitado pelo humano")
-                                    continue
-                            except (asyncio.TimeoutError, Exception):
-                                # Timeout ou erro — continuar debate
-                                consecutive_consensus = 0
-                                last_consensus = False
-                                logger.info(f"[HUMAN] Turno {current_turn}: timeout na validação humana")
-
-                        # Gerar resumos do debate
-                        summary_short = await generate_debate_summary(
-                            self.agents[0].model, topic, history, True
-                        )
-                        summary_full = await generate_full_summary(
-                            self.agents[0].model, topic, history, summary_short, True
-                        )
-                        await websocket.send_json({
-                            "event": "debate_complete",
-                            "data": {
-                                "reason": "consensus",
-                                "total_turns": current_turn,
-                                "summary": summary_short,
-                                "summary_full": summary_full
-                            }
-                        })
-                        return last_consensus, summary_short, summary_full
+                            return True, summary_short, summary_full
 
                     if current_turn >= self.max_turns:
                         break
@@ -2229,7 +2439,7 @@ async def debate_websocket(websocket: WebSocket):
 
             model = await resolve_model(req.model)
             agents = create_agents(model)
-            engine = MultiAgentEngine(agents=agents, num_ctx=req.num_ctx, max_turns=req.max_turns)
+            engine = MultiAgentEngine(agents=agents, num_ctx=req.num_ctx, max_turns=req.max_turns, model=model)
 
             conv_id = str(uuid.uuid4())
             logger.info(f"[SINGLE] Topico: {req.topic[:60]} | Modelo: {model}")
@@ -2284,7 +2494,7 @@ async def debate_websocket(websocket: WebSocket):
 
                 conv_id = str(uuid.uuid4())
                 agents = create_agents(model)
-                engine = MultiAgentEngine(agents=agents, num_ctx=req.num_ctx, max_turns=req.max_turns)
+                engine = MultiAgentEngine(agents=agents, num_ctx=req.num_ctx, max_turns=req.max_turns, model=model)
                 consensus, summary_short, summary_full = await engine.execute_debate(conv_id, topic, websocket, session_id)
 
                 topics_used.append({"topic": topic, "consensus": consensus})
@@ -2348,4 +2558,4 @@ async def debate_websocket(websocket: WebSocket):
             pass
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=cfg.HOST, port=cfg.PORT, workers=cfg.WORKERS)
