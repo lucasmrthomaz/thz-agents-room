@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MALE - Motor Multiagente Local</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>MALE</h1>
+            <p class="subtitle">Motor Multiagente Local &mdash; 9 LLMs debatendo autonomamente</p>
+        </header>
+
+        <div class="status-bar" id="statusBar">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Conectando...</span>
+            <button class="btn-link" onclick="loadHistory()">Historico</button>
+        </div>
+
+        <div class="card" id="formCard">
+            <h2>Novo Debate</h2>
+            <form id="debateForm" onsubmit="return startDebate(event)">
+                <div class="form-row">
+                    <div class="form-group flex-grow">
+                        <label for="topic">Topico</label>
+                        <input type="text" id="topic" placeholder="Ex: Microservicos vs Monolito" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="model">Modelo</label>
+                        <select id="model">
+                            <option value="auto">Auto</option>
+                            <option th:each="m : ${availableModels}" th:value="${m}" th:text="${m}"></option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary" id="startBtn">Iniciar Debate</button>
+                    <button type="button" class="btn btn-danger" id="stopBtn" onclick="stopDebate()" style="display:none">Parar</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="feed-container" id="feedContainer" style="display:none">
+            <div class="feed-header">
+                <span class="turn-badge" id="turnBadge">Turno 0</span>
+                <span id="topicLabel"></span>
+                <button class="btn btn-sm btn-export" id="exportBtn" onclick="exportChat()" style="display:none">Exportar</button>
+            </div>
+            <div class="feed" id="feed"></div>
+        </div>
+
+        <!-- History modal -->
+        <div class="modal-overlay" id="historyModal" style="display:none" onclick="closeHistory(event)">
+            <div class="modal" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <h2>Historico de Debates</h2>
+                    <button class="btn-close" onclick="document.getElementById('historyModal').style.display='none'">&times;</button>
+                </div>
+                <div class="modal-body" id="historyList">
+                    <div class="empty-state">Carregando...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+    <script th:src="@{/js/app.js}"></script>
+</body>
+</html>

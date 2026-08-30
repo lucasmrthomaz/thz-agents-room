@@ -1,0 +1,70 @@
+spring:
+  application:
+    name: male
+
+  threads:
+    virtual:
+      enabled: true
+
+  # SQLite
+  datasource:
+    url: jdbc:sqlite:../data/thz-room-cortex.db
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 1
+      minimum-idle: 1
+
+  jpa:
+    database-platform: org.hibernate.community.dialect.SQLiteDialect
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    open-in-view: false
+
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+  # Thymeleaf
+  thymeleaf:
+    prefix: classpath:/templates/
+    suffix: .html
+    cache: false
+
+  # Spring AI Ollama
+  ai:
+    ollama:
+      base-url: http://localhost:11434
+      init:
+        pull-model-strategy: WHEN_MISSING
+      chat:
+        options:
+          model: qwen2.5:7b
+          temperature: 0.5
+
+# Server
+server:
+  port: 9983
+
+# MALE Config
+male:
+  debate:
+    max-turns: 25
+    min-turns: 8
+    num-ctx: 8192
+    consensus-threshold: 5
+    pause-between-seconds: 300
+  session:
+    duration-hours: 8.0
+  model:
+    default: qwen2.5:7b
+    fast: qwen3.5:9b
+    primary: gemma4:12b-it-qat
+    supervisor: gemma4:26b-a4b-it-qat
+    embedding: nomic-embed-text
+
+logging:
+  level:
+    com.thz.male: INFO
+    org.springframework.ai: DEBUG
