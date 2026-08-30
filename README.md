@@ -5,6 +5,10 @@
 
 Sistema local de debates multiagente onde agentes de IA discutem temas de tecnologia, Constroem conhecimento ao longo do tempo e geram resumos automaticos.
 
+(Atualmente em longo processo de refinamento)
+<img  width="100%" height="100%" alt="Captura de tela 2026-08-27 034450" src="https://github.com/user-attachments/assets/660faddd-a04c-45f5-b51c-04db00106086" />
+
+
 ```
   THZ Minds — Motor Multiagente Local
   9 LLMs debatendo sobre tecnologia
