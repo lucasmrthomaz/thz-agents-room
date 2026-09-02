@@ -55,4 +55,11 @@ public class RestApiController {
         Map<String, Object> history = debateService.getTopicHistory(topic);
         return ResponseEntity.ok(history != null ? history : Map.of("message", "Topic not found"));
     }
+
+    @GetMapping("/scenario")
+    public ResponseEntity<Map<String, Object>> generateScenario() {
+        String model = modelService.resolveModel("auto");
+        String topic = topicService.generateTopic(model, List.of());
+        return ResponseEntity.ok(Map.of("topic", topic));
+    }
 }

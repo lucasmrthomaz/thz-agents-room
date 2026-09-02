@@ -7,61 +7,130 @@
     <link rel="stylesheet" th:href="@{/css/style.css}">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>MALE</h1>
-            <p class="subtitle">Motor Multiagente Local &mdash; 9 LLMs debatendo autonomamente</p>
+    <div class="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <h1>MALE</h1>
+                <p class="subtitle">Motor Multiagente Local &mdash; 9 LLMs debatendo autonomamente</p>
+            </div>
+            <div class="status-bar" id="statusBar">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Conectando...</span>
+            </div>
         </header>
 
-        <div class="status-bar" id="statusBar">
-            <span class="status-dot" id="statusDot"></span>
-            <span id="statusText">Conectando...</span>
-            <button class="btn-link" onclick="loadHistory()">Historico</button>
-        </div>
-
-        <div class="card" id="formCard">
-            <h2>Novo Debate</h2>
-            <form id="debateForm" onsubmit="return startDebate(event)">
-                <div class="form-row">
-                    <div class="form-group flex-grow">
-                        <label for="topic">Topico</label>
-                        <input type="text" id="topic" placeholder="Ex: Microservicos vs Monolito" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="model">Modelo</label>
+        <!-- Controls -->
+        <div class="controls">
+            <div class="control-row">
+                <div class="mode-group">
+                    <label class="mode-radio" data-mode="single">
+                        <input type="radio" name="mode" value="single" checked>
+                        <span class="mode-label" style="--mode-color: var(--accent-blue)">Debate</span>
+                    </label>
+                    <label class="mode-radio" data-mode="engineering">
+                        <input type="radio" name="mode" value="engineering">
+                        <span class="mode-label" style="--mode-color: var(--accent-green)">Engenharia</span>
+                    </label>
+                    <label class="mode-radio" data-mode="content">
+                        <input type="radio" name="mode" value="content">
+                        <span class="mode-label" style="--mode-color: var(--accent-magenta)">Artigo</span>
+                    </label>
+                    <label class="mode-radio" data-mode="autonomous">
+                        <input type="radio" name="mode" value="autonomous">
+                        <span class="mode-label" style="--mode-color: var(--accent-yellow)">Noturno</span>
+                    </label>
+                </div>
+                <div class="param-group">
+                    <div class="param">
+                        <label>Modelo</label>
                         <select id="model">
                             <option value="auto">Auto</option>
                             <option th:each="m : ${availableModels}" th:value="${m}" th:text="${m}"></option>
                         </select>
                     </div>
+                    <div class="param">
+                        <label>Turns</label>
+                        <input type="text" id="maxTurns" value="25" class="param-input">
+                    </div>
+                    <div class="param param-duration" style="display:none">
+                        <label>Duracao (h)</label>
+                        <input type="text" id="duration" value="8" class="param-input">
+                    </div>
                 </div>
-                <div class="form-actions">
-                    <button type="submit" class="btn btn-primary" id="startBtn">Iniciar Debate</button>
+                <div class="btn-group">
+                    <button type="button" class="btn btn-primary" id="startBtn" onclick="startDebate()">Iniciar</button>
                     <button type="button" class="btn btn-danger" id="stopBtn" onclick="stopDebate()" style="display:none">Parar</button>
                 </div>
-            </form>
+            </div>
+            <div class="topic-row">
+                <input type="text" id="topic" placeholder="Topico / Desafio..." class="topic-input">
+                <button type="button" class="btn btn-scenario" onclick="generateScenario()">Gerar Cenario</button>
+            </div>
         </div>
 
-        <div class="feed-container" id="feedContainer" style="display:none">
-            <div class="feed-header">
-                <span class="turn-badge" id="turnBadge">Turno 0</span>
-                <span id="topicLabel"></span>
-                <button class="btn btn-sm btn-export" id="exportBtn" onclick="exportChat()" style="display:none">Exportar</button>
-            </div>
-            <div class="feed" id="feed"></div>
+        <!-- Main Pane -->
+        <div class="main-pane">
+            <!-- Sidebar -->
+            <aside class="sidebar" id="sidebar">
+                <div class="sidebar-tabs">
+                    <button class="tab active" data-tab="history" onclick="switchTab('history')">Historico</button>
+                    <button class="tab" data-tab="projects" onclick="switchTab('projects')">Projetos</button>
+                    <button class="tab" data-tab="knowledge" onclick="switchTab('knowledge')">Conhecimento</button>
+                </div>
+                <div class="sidebar-content" id="sidebarContent">
+                    <div class="tab-panel active" id="panel-history">
+                        <div class="panel-header">
+                            <span>Debates anteriores</span>
+                            <button class="btn-icon" onclick="loadHistorySidebar()">&#x21bb;</button>
+                        </div>
+                        <div class="panel-list" id="historyList"></div>
+                    </div>
+                    <div class="tab-panel" id="panel-projects">
+                        <div class="panel-header">
+                            <span>Saidas geradas</span>
+                            <button class="btn-icon" onclick="loadProjects()">&#x21bb;</button>
+                        </div>
+                        <div class="panel-list" id="projectList"></div>
+                    </div>
+                    <div class="tab-panel" id="panel-knowledge">
+                        <div class="panel-header">
+                            <span>Topicos & Skills</span>
+                            <button class="btn-icon" onclick="loadKnowledge()">&#x21bb;</button>
+                        </div>
+                        <div class="panel-list" id="knowledgeList"></div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Feed -->
+            <main class="feed-area">
+                <div class="feed-header">
+                    <span class="turn-badge" id="turnBadge">Turno 0</span>
+                    <span class="feed-topic" id="topicLabel"></span>
+                    <div class="feed-actions">
+                        <button class="btn btn-sm btn-export" id="exportBtn" onclick="exportChat()" style="display:none">Exportar .md</button>
+                        <button class="btn btn-sm btn-sidebar-toggle" onclick="toggleSidebar()">&#9776;</button>
+                    </div>
+                </div>
+                <div class="feed" id="feed">
+                    <div class="empty-state" id="feedEmpty">
+                        <div class="empty-icon">&#x1f4ac;</div>
+                        <p>Selecione um topico e inicie o debate</p>
+                    </div>
+                </div>
+            </main>
         </div>
 
-        <!-- History modal -->
-        <div class="modal-overlay" id="historyModal" style="display:none" onclick="closeHistory(event)">
-            <div class="modal" onclick="event.stopPropagation()">
-                <div class="modal-header">
-                    <h2>Historico de Debates</h2>
-                    <button class="btn-close" onclick="document.getElementById('historyModal').style.display='none'">&times;</button>
-                </div>
-                <div class="modal-body" id="historyList">
-                    <div class="empty-state">Carregando...</div>
-                </div>
+        <!-- Loading Bar -->
+        <div class="loading-bar" id="loadingBar" style="display:none">
+            <span class="spinner" id="spinner"></span>
+            <span class="loading-msg" id="loadingMsg">Carregando...</span>
+            <span class="loading-time" id="loadingTime"></span>
+            <div class="progress-wrap">
+                <div class="progress-bar" id="progressBar"></div>
             </div>
+            <span class="progress-text" id="progressText"></span>
         </div>
     </div>
 

@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 import com.thz.male.repository.TopicMemoryRepository;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 public class TopicService {
@@ -98,8 +99,8 @@ public class TopicService {
             if (normalized.equals(oldNorm))
                 return true;
 
-            Set<String> words1 = new HashSet<>(Set.of(normalized.split("\\s+")));
-            Set<String> words2 = new HashSet<>(Set.of(oldNorm.split("\\s+")));
+            Set<String> words1 = new HashSet<>(Arrays.asList(normalized.split("\\s+")));
+            Set<String> words2 = new HashSet<>(Arrays.asList(oldNorm.split("\\s+")));
             Set<String> intersection = new HashSet<>(words1);
             intersection.retainAll(words2);
             Set<String> union = new HashSet<>(words1);
